@@ -7,7 +7,7 @@ offline and never committed). `tools/dist.sh` refuses to build a release
 signed with any other key.
 
 SHA-256 fingerprint:
-`36:37:FD:2F:1A:B0:9D:62:94:78:EC:89:EB:A2:A2:5F:E7:E8:3C:70:77:E2:02:97:E7:D3:79:11:D8:76:F3:41`
+`DA:CB:F2:AD:3E:36:36:52:47:30:D5:CE:3D:02:BF:CB:16:5D:ED:9E:C1:D9:D6:DD:BF:C0:4A:3C:47:C7:FC:81`
 
 If the private key is ever lost, new releases need a new key, and every PC
 must approve it once more. If it leaks, anything signed with it would boot
