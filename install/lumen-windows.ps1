@@ -102,7 +102,12 @@ public static class LumenFw {
     /// Last error from Get (203 = variable not found).
     public static int LastGetError;
 
+    // Other components (e.g. Confirm-SecureBootUEFI) switch this privilege
+    // off again after using it, so it's re-enabled before every call.
+    static void Ensure() { try { EnablePrivilege(); } catch { } }
+
     public static byte[] Get(string name, string guid) {
+        Ensure();
         byte[] buf = new byte[65536];
         uint attr;
         uint n = GetFirmwareEnvironmentVariableExW(name, guid, buf, (uint)buf.Length, out attr);
@@ -113,6 +118,7 @@ public static class LumenFw {
     }
 
     public static void Set(string name, string guid, byte[] data, uint attr) {
+        Ensure();
         if (!SetFirmwareEnvironmentVariableExW(name, guid, data, (uint)(data == null ? 0 : data.Length), attr)) {
             int code = Marshal.GetLastWin32Error();
             throw new Win32Exception(code, "The firmware refused to save " + name + ": " + new Win32Exception(code).Message + " (error " + code + ")");
@@ -151,7 +157,6 @@ function Initialize-FirmwareAccess {
         $script:UseBcdedit = $true
         Write-Log "Direct firmware variable access unavailable (privilege $priv, read error $err); using bcdedit."
     } else {
-        $script:AccessProven = $true
         Write-Log 'Using direct firmware variable access.'
     }
 }
@@ -227,14 +232,10 @@ function New-LoadOption($part, [string]$file, [string]$desc) {
     [byte[]]([BitConverter]::GetBytes([uint32]1) + [BitConverter]::GetBytes([uint16]$path.Length) + $d + $path)
 }
 
-$script:AccessProven = $false
 function Test-BootSlotFree([uint16]$n) {
-    # "Not found" (203) means free. Some firmware (Hyper-V) reports missing
-    # variables as 1314 instead; that only counts as free once we've proven
-    # we can read existing boot entries, so a real access problem can never
-    # make us overwrite an entry.
-    $null -eq [LumenFw]::Get(('Boot{0:X4}' -f $n), [LumenFw]::GlobalGuid) -and
-        ([LumenFw]::LastGetError -eq 203 -or ($script:AccessProven -and [LumenFw]::LastGetError -eq 1314))
+    # Only a definite "not found" (203) means free. Any other failure means
+    # we can't tell, and an existing entry must never be overwritten.
+    $null -eq [LumenFw]::Get(('Boot{0:X4}' -f $n), [LumenFw]::GlobalGuid) -and [LumenFw]::LastGetError -eq 203
 }
 
 function New-LumenEntry {
@@ -245,6 +246,7 @@ function New-LumenEntry {
         $num = 0..0xFF | Where-Object { $used -notcontains $_ -and (Test-BootSlotFree $_) } | Select-Object -First 1
         if ($null -eq $num) { throw "no free boot entry slot (firmware read error $([LumenFw]::LastGetError))" }
         $num = [uint16]$num
+        if (-not (Test-BootSlotFree $num)) { throw ('Boot{0:X4} is no longer free' -f $num) }
         [LumenFw]::Set(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid, (New-LoadOption $part $Loader $Label), [LumenFw]::NvBsRt)
         if ((Get-BootDescription $num) -ne $Label) { throw "the firmware didn't keep the new boot entry" }
         Write-Log "Created boot entry Boot$('{0:X4}' -f $num) directly."

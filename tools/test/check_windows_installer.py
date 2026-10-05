@@ -15,7 +15,7 @@ hd = struct.pack("<BBHIQQ", 4, 1, 42, 1, 1048576 // 512, 104857600 // 512) + uui
 name = "\\EFI\\lumen\\shimx64.efi\0".encode("utf-16-le")
 path = hd + struct.pack("<BBH", 4, 4, 4 + len(name)) + name + bytes([0x7F, 0xFF, 4, 0])
 want_opt = struct.pack("<IH", 1, len(path)) + "Lumen\0".encode("utf-16-le") + path
-cert = open(os.path.join(ROOT, "keys", "lumen.cer"), "rb").read()
+cert = open(os.path.join(ROOT, "release", "lumen.cer"), "rb").read()
 new = mok_request.mok_new(cert)
 
 ok = True
