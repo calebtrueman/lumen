@@ -23,6 +23,7 @@
 #>
 param(
     [switch]$Heal,
+    [switch]$Diagnose,
     [switch]$Uninstall,
     [switch]$Gui,
     [switch]$Yes,
@@ -196,13 +197,13 @@ function Test-BootSlotFree([uint16]$n) {
 function New-LumenEntry {
     $part = Get-EspPartition
     if (-not $part) { throw "Couldn't find the EFI system partition." }
-    $used = @(Get-BootOrder)
-    $num = 0..0xFF | Where-Object { $used -notcontains $_ -and (Test-BootSlotFree $_) } | Select-Object -First 1
-    if ($null -eq $num) { throw 'No free firmware boot entry slot.' }
-    $num = [uint16]$num
     try {
+        $used = @(Get-BootOrder)
+        $num = 0..0xFF | Where-Object { $used -notcontains $_ -and (Test-BootSlotFree $_) } | Select-Object -First 1
+        if ($null -eq $num) { throw "no free boot entry slot (firmware read error $([LumenFw]::LastGetError))" }
+        $num = [uint16]$num
         [LumenFw]::Set(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid, (New-LoadOption $part $Loader $Label), [LumenFw]::NvBsRt)
-        if ((Get-BootDescription $num) -ne $Label) { throw "The firmware didn't keep the new boot entry." }
+        if ((Get-BootDescription $num) -ne $Label) { throw "the firmware didn't keep the new boot entry" }
         Write-Log "Created boot entry Boot$('{0:X4}' -f $num) directly."
         return $num
     } catch {
@@ -581,6 +582,20 @@ function Start-Gui {
 
 # ---- entry point -------------------------------------------------------------
 
+if ($Diagnose) {
+    # Support aid: shows what the installer sees, changes nothing.
+    try { [LumenFw]::EnablePrivilege(); 'Privilege: enabled' } catch { "Privilege: $($_.Exception.Message)" }
+    "Firmware type: $env:firmware_type   OS arch: $OsArch   Secure Boot: $(Test-SecureBoot)"
+    $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
+    "BootOrder read: $(if ($order) { ($order.Length / 2).ToString() + ' entries' } else { 'failed, error ' + [LumenFw]::LastGetError })"
+    foreach ($n in @(Get-BootOrder) + @(0, 1, 2, 3, 0x80)) {
+        $d = Get-BootDescription $n
+        'Boot{0:X4}: {1}' -f $n, $(if ($d) { $d } else { "(none, error $([LumenFw]::LastGetError))" })
+    }
+    "Lumen entry: $(Find-LumenEntry)   healthy: $(Test-Healthy)"
+    try { "ESP: $((Get-EspPartition | Select-Object DiskNumber, PartitionNumber, Size, Guid | Out-String).Trim())" } catch { "ESP: $($_.Exception.Message)" }
+    return
+}
 if ($Heal) {
     try { [LumenFw]::EnablePrivilege(); Invoke-Heal } catch { Write-Log "Heal: $($_.Exception.Message)" }
     return

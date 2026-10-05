@@ -31,6 +31,7 @@ jobs:
             dist/Lumen-Installer-Windows.exe
             dist/Lumen-Installer-Linux.run
             dist/SHA256SUMS
+            dist/x86_64/lumen-windows.ps1
 
   windows-install:
     name: Install / heal / uninstall on Windows
@@ -47,6 +48,8 @@ jobs:
           "Firmware: $env:firmware_type"
           if ($env:firmware_type -ne 'UEFI') { "::warning::This runner boots in BIOS mode; can't exercise firmware boot entries."; exit 0 }
           try { "Secure Boot: $(Confirm-SecureBootUEFI)" } catch { "Secure Boot: unsupported" }
+          "--- what the installer sees ---"
+          powershell -NoProfile -ExecutionPolicy Bypass -File x86_64\lumen-windows.ps1 -Diagnose -Bundle x86_64
           "--- firmware boot entries before install ---"
           bcdedit /enum firmware
 
