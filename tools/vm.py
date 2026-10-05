@@ -9,7 +9,7 @@ import os, shutil, socket, struct, subprocess, sys, time, zlib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "target", "vm")
 REL = os.path.join(ROOT, "target", "x86_64-unknown-uefi", "release")
-# Build with: cargo build --release --features debugcon --examples --bins
+# Build with: cargo efi-x64 --features debugcon && cargo build --release --examples
 SHARE = "/opt/homebrew/share/qemu"
 
 
@@ -34,8 +34,10 @@ def stage_secureboot(put):
     if DEB:
         put("disk0", "EFI/debian/shimx64.efi", f"{DIST}/shimx64.efi")
         put("disk0", "EFI/debian/grubx64.efi", f"{DEB}/grubx64.efi")
+    # --sb-off: Microsoft keys enrolled but Secure Boot switched off, as on a
+    # PC whose owner can turn it on later.
     cmd = [VFV, "--input", f"{SHARE}/edk2-i386-vars.fd", "--output", f"{OUT}/vars.fd",
-           "--enroll-microsoft", "--microsoft-db", "all", "--sb"]
+           "--enroll-microsoft", "--microsoft-db", "all"] + ([] if "--sb-off" in sys.argv else ["--sb"])
     if MOK == "enrolled":
         cmd += ["--add-mok", "605dab50-e046-4300-abb6-3dd810dd8b23", f"{DIST}/lumen.cer"]
     elif MOK == "queued":
@@ -46,7 +48,7 @@ def stage_secureboot(put):
 def stage():
     shutil.rmtree(OUT, ignore_errors=True)
     os.makedirs(OUT)
-    lumen = os.path.join(REL, "lumen.efi")
+    lumen = os.path.join(ROOT, "target", "x86_64-lumen-uefi", "release", "lumen.efi")
     fake = os.path.join(REL, "examples", "fake_os.efi")
 
     def put(disk, path, src):
@@ -60,6 +62,12 @@ def stage():
     if os.path.exists(shim):
         put("usb_debian", "EFI/BOOT/BOOTX64.EFI", shim)
         put("usb_debian", "EFI/BOOT/grubx64.efi", os.path.join(REL, "examples", "fake_os.efi"))
+    # Bazzite live USB: Fedora-based, so it also carries \EFI\fedora; it must
+    # still show up as one "Bazzite (USB)" card, not as Fedora too.
+    put("usb_bazzite", "EFI/BOOT/BOOTX64.EFI", os.path.join(REL, "examples", "fake_os.efi"))
+    put("usb_bazzite", "EFI/fedora/shimx64.efi", os.path.join(REL, "examples", "fake_os.efi"))
+    with open(os.path.join(OUT, "usb_bazzite", "EFI", "BOOT", "grub.cfg"), "w") as f:
+        f.write("menuentry 'Install Bazzite' --class fedora {\n  linux /images/pxeboot/vmlinuz\n}\n")
     # Arch ISO: systemd-boot with an entry titled "Arch Linux install medium".
     put("usb_arch", "EFI/BOOT/BOOTX64.EFI", os.path.join(REL, "examples", "fake_os.efi"))
     os.makedirs(os.path.join(OUT, "usb_arch", "loader", "entries"))
@@ -92,7 +100,7 @@ def stage():
     put("disk0", "EFI/fedora/grubx64.efi", fake)
     put("disk0", "EFI/Linux/arch-linux.efi", fake)
     with open(os.path.join(OUT, "disk0", "EFI", "lumen", "lumen.conf"), "w") as f:
-        f.write("timeout -1\nentry Arch (fallback) | \\EFI\\Linux\\arch-linux.efi | initrd=\\initramfs-fallback.img\n")
+        f.write("timeout -1\ndebug on\nentry Arch (fallback) | \\EFI\\Linux\\arch-linux.efi | initrd=\\initramfs-fallback.img\n")
     # Disk 1: a separate Windows drive with its own ESP.
     put("disk1", "EFI/Microsoft/Boot/bootmgfw.efi", fake)
     put("disk1", "EFI/Boot/bootx64.efi", fake)
@@ -141,10 +149,18 @@ def ppm_to_png(ppm, png):
 
 def main():
     args = sys.argv[1:]
-    stage()
+    # --reuse: boot the previous run's disks and firmware variables again.
+    # --enable-sb: switch Secure Boot on in those variables first.
+    if "--reuse" not in args:
+        stage()
+    if "--enable-sb" in args:
+        subprocess.check_call([VFV, "--input", f"{OUT}/vars.fd", "--output", f"{OUT}/vars.fd", "--set-true", "SecureBootEnable"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if "--headless" not in args:
         subprocess.call(qemu_cmd(False))
         return
+    if os.path.exists(f"{OUT}/mon.sock"):
+        os.remove(f"{OUT}/mon.sock")  # stale socket from a previous (--reuse) run
     proc = subprocess.Popen(qemu_cmd(True))
     try:
         for _ in range(50):
@@ -158,7 +174,7 @@ def main():
             time.sleep(0.3)
         it = iter(args)
         for a in it:
-            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test", "--demo"):
+            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test", "--demo", "--sb-off", "--reuse", "--enable-sb"):
                 continue
             if a == "--mouse-test":
                 next(it), next(it)
@@ -181,7 +197,13 @@ def main():
                 ppm_to_png(ppm, f"{OUT}/{name}.png")
                 print("shot", f"{OUT}/{name}.png")
     finally:
-        proc.kill()
+        # Quit cleanly so firmware variable writes reach vars.fd (a kill can
+        # drop them).
+        try:
+            mon.sendall(b"quit\n")
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
 
 
 if __name__ == "__main__":

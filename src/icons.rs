@@ -175,3 +175,17 @@ pub fn draw_restart(cv: &mut Canvas, cx: f32, cy: f32, d: f32, c: Color, alpha: 
         arc.min(a1).min(a2)
     }, |_, _| c);
 }
+
+/// Stopwatch-style timer: a ring with a hand and a button on top.
+pub fn draw_timer(cv: &mut Canvas, cx: f32, cy: f32, d: f32, c: Color, alpha: f32) {
+    let r = d / 2.0;
+    let t = d * 0.1;
+    let (ccx, ccy) = (cx, cy + r * 0.08);
+    let ring = r * 0.72;
+    cv.paint((cx - r, cy - r, cx + r, cy + r), alpha, |px, py| {
+        let face = fabsf(len(px - ccx, py - ccy) - ring) - t / 2.0;
+        let hand = sd_segment(px, py, ccx, ccy, ccx + ring * 0.42, ccy - ring * 0.42, t / 2.0);
+        let button = sd_segment(px, py, ccx, ccy - ring - t * 1.2, ccx, ccy - ring - t * 0.2, t / 2.0);
+        face.min(hand).min(button)
+    }, |_, _| c);
+}

@@ -47,7 +47,14 @@ else
     fi
 fi
 [ -f "vendor/shim/$ARCH/shim$S.efi" ] || tools/fetch-shim.sh
-cargo build --release --target "$ARCH-unknown-uefi"
+if [ "$ARCH" = x86_64 ]; then
+    # SSE2 hardware floating point; see targets/x86_64-lumen-uefi.json.
+    cargo efi-x64
+    EFI=target/x86_64-lumen-uefi/release/lumen.efi
+else
+    cargo build --release --target "$ARCH-unknown-uefi"
+    EFI=target/$ARCH-unknown-uefi/release/lumen.efi
+fi
 
 rm -rf "$OUT" && mkdir -p "$OUT"
 # The passphrase goes through a private temp file, not the command line.
@@ -59,7 +66,7 @@ if grep -q "ENCRYPTED PRIVATE KEY" "$KEYS/lumen.key"; then
     set -- -readpass "$PASSFILE"
 fi
 osslsigncode sign -h sha256 -certs "$KEYS/lumen.crt" -key "$KEYS/lumen.key" "$@" \
-    -in "target/$ARCH-unknown-uefi/release/lumen.efi" -out "$OUT/lumen.efi" >/dev/null
+    -in "$EFI" -out "$OUT/lumen.efi" >/dev/null
 cp "vendor/shim/$ARCH/shim$S.efi" "vendor/shim/$ARCH/mm$S.efi" "$KEYS/lumen.cer" "$OUT/"
 cp install/install-linux.sh install/lumen-heal.sh install/mok-request.sh install/lumen-windows.ps1 install/lumen.conf "$OUT/"
 echo "Bundle ready in $OUT:"

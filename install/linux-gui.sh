@@ -110,7 +110,10 @@ TEXT="Lumen adds a graphical menu that appears when your PC starts, so you can c
 Your current setup is kept: GRUB, Windows and everything else stay as they are, and if Lumen ever has a problem the PC simply starts the way it does today."
 if sb_on; then TEXT="$TEXT
 
-Secure Boot stays on. You'll approve Lumen once on the next restart."; fi
+Secure Boot stays on. You'll approve Lumen once on the next restart."
+else TEXT="$TEXT
+
+You'll approve Lumen once on the next restart, so it keeps working if you turn on Secure Boot later."; fi
 ask "$VERB Lumen" "$TEXT" "$VERB" "Cancel" || exit 0
 
 CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }')

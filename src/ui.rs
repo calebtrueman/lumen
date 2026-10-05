@@ -12,19 +12,20 @@ use uefi::proto::console::text::{Key, ScanCode};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Action {
+    /// Cycles the auto-start delay: off, 5, 10, 30 seconds.
+    AutoStart,
     Firmware,
     Restart,
     Shutdown,
 }
 
-impl Action {
-    fn label(self) -> &'static str {
-        match self {
-            Action::Firmware => "Firmware Settings",
-            Action::Restart => "Restart",
-            Action::Shutdown => "Shut Down",
-        }
-    }
+/// Auto-start choices offered by the Auto-start button, in seconds
+/// (-1 = wait until the user chooses).
+pub const AUTO_START_PRESETS: [i32; 4] = [-1, 5, 10, 30];
+
+pub fn next_auto_start(current: i32) -> i32 {
+    let i = AUTO_START_PRESETS.iter().position(|&p| p == current).map(|i| i + 1).unwrap_or(0);
+    AUTO_START_PRESETS[i % AUTO_START_PRESETS.len()]
 }
 
 pub enum Command {
@@ -66,6 +67,8 @@ pub struct Ui {
     hits: Vec<(f32, f32, f32, f32, Target)>,
     /// Pointer position while a mouse is in use; hidden when typing.
     cursor: Option<(f32, f32)>,
+    /// Auto-start delay in seconds, -1 = off. Shown on the Auto-start button.
+    pub auto_start: i32,
 }
 
 const ANIM_RATE: f32 = 14.0;
@@ -73,6 +76,7 @@ const ANIM_RATE: f32 = 14.0;
 impl Ui {
     pub fn new(entries: Vec<Entry>, sel: usize, firmware_setup: bool, now: f64) -> Self {
         let mut actions = Vec::new();
+        actions.push(Action::AutoStart);
         if firmware_setup {
             actions.push(Action::Firmware);
         }
@@ -97,6 +101,7 @@ impl Ui {
             redraw: true,
             hits: Vec::new(),
             cursor: None,
+            auto_start: -1,
         }
     }
 
@@ -437,6 +442,21 @@ impl Ui {
         }
     }
 
+    fn action_label(&self, a: Action) -> String {
+        match a {
+            Action::AutoStart if self.auto_start < 0 => "Auto-start: Off".into(),
+            Action::AutoStart => format!("Auto-start: {} s", self.auto_start),
+            Action::Firmware => "Firmware Settings".into(),
+            Action::Restart => "Restart".into(),
+            Action::Shutdown => "Shut Down".into(),
+        }
+    }
+
+    pub fn set_auto_start(&mut self, secs: i32) {
+        self.auto_start = secs;
+        self.redraw = true;
+    }
+
     fn draw_actions(&mut self, cv: &mut Canvas, text: &mut Text, s: f32) {
         let (w, h) = (cv.w as f32, cv.h as f32);
         let white = rgb(255, 255, 255);
@@ -447,7 +467,7 @@ impl Ui {
         let widths: Vec<f32> = self
             .actions
             .iter()
-            .map(|a| pad + icon + 10.0 * s + text.width(Face::Body, size, a.label()) + pad)
+            .map(|&a| pad + icon + 10.0 * s + text.width(Face::Body, size, &self.action_label(a)) + pad)
             .collect();
         let gap = 14.0 * s;
         let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
@@ -460,11 +480,13 @@ impl Ui {
             let (ix, iy) = (x + pad + icon / 2.0, y + ph / 2.0);
             let ia = 0.6 + 0.4 * f;
             match a {
+                Action::AutoStart => icons::draw_timer(cv, ix, iy, icon, white, ia),
                 Action::Firmware => icons::draw_gear(cv, ix, iy, icon * 1.1, white, ia),
                 Action::Restart => icons::draw_restart(cv, ix, iy, icon, white, ia),
                 Action::Shutdown => icons::draw_power(cv, ix, iy, icon, white, ia),
             }
-            text.draw(cv, Face::Body, size, a.label(), x + pad + icon + 10.0 * s, y + ph / 2.0 + size * 0.36, white, ia);
+            let label = self.action_label(a);
+            text.draw(cv, Face::Body, size, &label, x + pad + icon + 10.0 * s, y + ph / 2.0 + size * 0.36, white, ia);
             self.hits.push((x, y, pw, ph, Target::Action(i)));
             x += pw + gap;
         }

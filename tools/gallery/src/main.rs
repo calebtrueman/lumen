@@ -62,6 +62,64 @@ fn main() {
         }
         return;
     }
+    // `--bench W H`: time a Lumen-like menu frame (backdrop copy, glow, four
+    // cards with icons and text, power row) at that resolution.
+    if args.get(1).map(String::as_str) == Some("--bench") {
+        let (w, h): (usize, usize) = (args[2].parse().unwrap(), args[3].parse().unwrap());
+        let mut bg = gfx::Canvas::new(w, h);
+        let t = std::time::Instant::now();
+        gfx::render_backdrop(&mut bg);
+        println!("backdrop (once):      {:6.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let mut cv = gfx::Canvas::new(w, h);
+        let mut text = text::Text::new();
+        let s = (h as f32 / 1080.0).clamp(0.55, 2.5).min(w as f32 / 1280.0 * 1.2);
+        let (cw, ch, gap) = (212.0 * s, 236.0 * s, 34.0 * s);
+        let icons = [os::WINDOWS, os::by_name("Fedora").unwrap().icon, os::by_name("Ubuntu").unwrap().icon, os::by_name("Bazzite").unwrap().icon];
+        let mut phases = [0.0f64; 5];
+        let frames = 30;
+        for f in 0..frames {
+            let t0 = std::time::Instant::now();
+            cv.px.copy_from_slice(&bg.px);
+            let t1 = std::time::Instant::now();
+            let total = 4.0 * cw + 3.0 * gap;
+            let x0 = (w as f32 - total) / 2.0;
+            let row_y = h as f32 * 0.47;
+            let sel = f % 4;
+            let cx = |i: usize| x0 + i as f32 * (cw + gap) + cw / 2.0;
+            cv.glow(cx(sel), row_y, cw * 1.7, icons[sel].accent(), 0.6);
+            let t2 = std::time::Instant::now();
+            for (i, icon) in icons.iter().enumerate() {
+                let sc = if i == sel { 1.07 } else { 1.0 };
+                let (cww, chh) = (cw * sc, ch * sc);
+                let (x, y) = (cx(i) - cww / 2.0, row_y - chh / 2.0);
+                cv.shadow(x, y + 16.0 * s, cww, chh, 28.0 * s, 40.0 * s, gfx::rgb(0, 0, 0), 0.32);
+                cv.rrect(x, y, cww, chh, 28.0 * s, gfx::rgb(255, 255, 255), 0.08);
+                cv.rrect_stroke(x, y, cww, chh, 28.0 * s, 1.2 * s, gfx::rgb(255, 255, 255), 0.2);
+                icons::draw_tile(&mut cv, &mut text, *icon, cx(i), y + chh * 0.43, 116.0 * s * sc, 1.0);
+            }
+            let t3 = std::time::Instant::now();
+            for i in 0..4 {
+                text.draw_centered(&mut cv, text::Face::Body, 19.0 * s, "Windows", cx(i), row_y + ch * 0.4, gfx::rgb(255, 255, 255), 0.9);
+            }
+            text.draw(&mut cv, text::Face::Display, 34.0 * s, "23:40", 64.0 * s, 82.0 * s, gfx::rgb(255, 255, 255), 0.9);
+            for i in 0..3 {
+                let x = w as f32 / 2.0 - 300.0 * s + i as f32 * 200.0 * s;
+                cv.rrect(x, h as f32 - 110.0 * s, 180.0 * s, 46.0 * s, 23.0 * s, gfx::rgb(255, 255, 255), 0.06);
+            }
+            let t4 = std::time::Instant::now();
+            for (k, (a, b)) in [(t0, t1), (t1, t2), (t2, t3), (t3, t4), (t0, t4)].iter().enumerate() {
+                phases[k] += (*b - *a).as_secs_f64() * 1e3;
+            }
+        }
+        let n = frames as f64;
+        println!("{w}x{h}, per frame (avg of {frames}):");
+        for (k, name) in ["copy background", "selection glow", "4 cards + icons", "text + buttons", "TOTAL draw"].iter().enumerate() {
+            println!("  {name:18} {:6.1} ms", phases[k] / n);
+        }
+        let mb = (w * h * 4) as f64 / 1e6;
+        println!("  full-frame present = {mb:.1} MB per frame");
+        return;
+    }
     let out = args.get(1).cloned().unwrap_or_else(|| "gallery.ppm".into());
     let cols = 10;
     let (cell_w, cell_h) = (150.0, 170.0);

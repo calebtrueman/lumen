@@ -276,7 +276,7 @@ Each "OS" is a small test loader that prints how it was started.
 
 ```sh
 brew install qemu osslsigncode && pip install virt-firmware
-cargo build --release --features debugcon --examples --bins && tools/dist.sh
+cargo efi-x64 --features debugcon && cargo build --release --examples && tools/dist.sh
 python3 tools/vm.py                                    # interactive window
 python3 tools/vm.py --headless --wait 30 --shot menu   # -> target/vm/menu.png
 python3 tools/test/check_windows_installer.py pwsh     # Windows installer byte-level checks

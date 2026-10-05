@@ -1,7 +1,9 @@
 //! `lumen.conf`, read from the directory Lumen itself was loaded from.
 //!
 //! ```text
-//! timeout 5              # seconds; 0 boots the default at once, -1 waits forever
+//! timeout -1             # default: wait until chosen. Seconds to auto-start the
+//!                        # default; 0 boots it at once. Lumen's Auto-start
+//!                        # button overrides this.
 //! default last           # "last" (remember previous choice) or part of a title
 //! hide Recovery          # hide entries whose title or path contains this
 //! resolution max         # "keep", "max" or WIDTHxHEIGHT
@@ -32,6 +34,8 @@ pub struct Config {
     pub hide: Vec<String>,
     pub resolution: Resolution,
     pub clock: bool,
+    /// On-screen frame timing (`debug on`).
+    pub debug: bool,
     pub bootnext: Vec<String>,
     pub entries: Vec<CustomEntry>,
 }
@@ -39,11 +43,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            timeout: 5,
+            timeout: -1,
             default: "last".into(),
             hide: Vec::new(),
             resolution: Resolution::Keep,
             clock: true,
+            debug: false,
             bootnext: Vec::new(),
             entries: Vec::new(),
         }
@@ -64,6 +69,7 @@ impl Config {
                 "default" => cfg.default = val.to_string(),
                 "hide" if !val.is_empty() => cfg.hide.push(val.to_lowercase()),
                 "bootnext" if !val.is_empty() => cfg.bootnext.push(val.to_lowercase()),
+                "debug" => cfg.debug = matches!(val, "on" | "yes" | "true" | "1"),
                 "clock" => cfg.clock = !matches!(val, "off" | "no" | "false" | "0"),
                 "resolution" => {
                     cfg.resolution = match val {

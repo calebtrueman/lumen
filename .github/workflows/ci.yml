@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: |
-          rustup target add x86_64-unknown-uefi aarch64-unknown-uefi x86_64-pc-windows-gnu
+          rustup toolchain install   # the pinned nightly, targets and rust-src from rust-toolchain.toml
           sudo apt-get update -qq
           sudo apt-get install -y -qq osslsigncode mingw-w64 >/dev/null
       - name: Build (signed with a throwaway test key, not the release key)

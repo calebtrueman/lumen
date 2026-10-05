@@ -195,7 +195,7 @@ put "$HERE/mm$S.efi" "$D/mm$S.efi"
 put "$HERE/lumen.cer" "$D/lumen.cer"
 put "$HERE/lumen.efi" "$D/grub$S.efi" # shim starts grub<arch>.efi from its own folder
 if [ ! -f "$D/lumen.conf" ]; then
-    cp "$HERE/lumen.conf" "$D/lumen.conf" 2>/dev/null || printf 'timeout 5\ndefault last\n' > "$D/lumen.conf"
+    cp "$HERE/lumen.conf" "$D/lumen.conf" 2>/dev/null || printf 'default last\n' > "$D/lumen.conf"
     # BitLocker measures the boot chain; hand Windows to its own firmware
     # entry so it never asks for the recovery key.
     if command -v blkid >/dev/null && blkid -t TYPE=BitLocker >/dev/null 2>&1; then
@@ -252,24 +252,23 @@ UNIT
     systemctl enable lumen-heal.service >/dev/null 2>&1 || true
 fi
 
-if sb_on; then
-    if key_enrolled; then
-        result "mok=enrolled"
-    else
-        if [ -z "$CODE" ]; then CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }'); fi
-        LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" "$HERE/lumen.cer" >/dev/null || die "couldn't queue the Secure Boot key"
-        result "mok=queued"
-        result "code=$CODE"
-    fi
+# Ask for the one-time Secure Boot approval even when Secure Boot is off, so
+# turning it on later doesn't stop Lumen from starting.
+if key_enrolled; then
+    result "mok=enrolled"
 else
-    result "mok=off"
+    if [ -z "$CODE" ]; then CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }'); fi
+    LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" "$HERE/lumen.cer" >/dev/null || die "couldn't queue the Secure Boot key"
+    result "mok=queued"
+    result "code=$CODE"
 fi
+sb_on && result "secureboot=1" || result "secureboot=0"
 
 DONE=1
 result "ok=1"
 result "update=$UPDATE"
 say "done."
-if [ "$YES" -ne 1 ] && sb_on && ! key_enrolled; then
+if [ "$YES" -ne 1 ] && [ -n "$CODE" ]; then
     cat <<MSG
 
 Restart your PC. A blue "Shim UEFI key management" screen will appear once:

@@ -280,18 +280,40 @@ function Remove-LumenEntry([uint16]$num) {
     [LumenFw]::Set(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid, $null, [LumenFw]::NvBsRt)
 }
 
-# Promote Lumen to first only once it has proven it runs on this PC.
+# Can Lumen start right now? Under Secure Boot, shim only starts it if its
+# key was approved; otherwise it would stop at shim's error screen. A queued
+# approval counts: its screen appears on the next boot, which must go ahead.
+function Test-CanStart {
+    if (-not (Test-SecureBoot)) { return $true }
+    $cer = @((Join-Path $Data 'lumen.cer'), (Join-Path $Bundle 'lumen.cer')) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $cer) { return $true }
+    [byte[]]$cert = [IO.File]::ReadAllBytes($cer)
+    (Test-KeyEnrolled $cert) -or ([LumenFw]::IndexOf([LumenFw]::Get('MokNew', [LumenFw]::ShimGuid), $cert) -ge 0)
+}
+
+# Promote Lumen to first only once it has proven it runs on this PC, and
+# step it aside if it can't start (Secure Boot turned on without approval).
 function Invoke-Heal {
     $num = Find-LumenEntry
     if ($null -eq $num) {
         if (-not (Test-LumenFiles)) { return }   # uninstalled from the ESP; nothing to heal
         $order = @(Get-BootOrder)
-        $num = New-LumenEntry
-        if (Test-Healthy) { Set-BootOrder (@($num) + $order) } else { Set-BootOrder ($order + @($num)) }
+        $num = [uint16]@(New-LumenEntry)[-1]
+        if ((Test-Healthy) -and (Test-CanStart)) { Set-BootOrder (@($num) + $order) } else { Set-BootOrder ($order + @($num)) }
         Write-Log "Recreated the Lumen boot entry (Boot$('{0:X4}' -f $num))."
     }
-    if (-not (Test-Healthy)) { return }
     $order = @(Get-BootOrder)
+    if (-not (Test-CanStart)) {
+        # Don't let every boot stop at shim's "Verification failed" screen.
+        if ($order.Count -gt 0 -and $order[0] -eq $num) {
+            Set-BootOrder (@($order | Where-Object { $_ -ne $num }) + @($num))
+            Write-Log 'Secure Boot is on but Lumen is not approved yet: Windows starts directly until the installer is run again.'
+        }
+        $next = [LumenFw]::Get('BootNext', [LumenFw]::GlobalGuid)
+        if ($next -and [BitConverter]::ToUInt16($next, 0) -eq $num) { [LumenFw]::Set('BootNext', [LumenFw]::GlobalGuid, $null, [LumenFw]::NvBsRt) }
+        return
+    }
+    if (-not (Test-Healthy)) { return }
     if ($order.Count -eq 0 -or $order[0] -ne $num) {
         Set-BootOrder (@($num) + @($order | Where-Object { $_ -ne $num }))
         Write-Log 'Moved Lumen back to the front of the boot order.'
@@ -356,13 +378,19 @@ function Get-InstallState {
     [byte[]]$cert = [IO.File]::ReadAllBytes((Join-Path $Bundle 'lumen.cer'))
     $bitlocker = $false
     try { $bitlocker = (Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop).ProtectionStatus -eq 'On' } catch {}
-    if ($script:UseBcdedit -and $sb) {
-        throw "Secure Boot is on, but this account can't change firmware settings, which the one-time Secure Boot approval needs. Run the installer from a regular administrator account."
+    $enrolled = Test-KeyEnrolled $cert
+    if ($script:UseBcdedit -and -not $enrolled) {
+        if ($sb) {
+            throw "Secure Boot is on, but this account can't change firmware settings, which the one-time Secure Boot approval needs. Run the installer from a regular administrator account."
+        }
+        Write-Log "Can't queue the Secure Boot approval from this account; Lumen will work while Secure Boot stays off."
     }
     @{
         Installed = ($(if ($script:UseBcdedit) { [bool](Find-LumenBcdId) } else { $null -ne (Find-LumenEntry) })) -or (Test-LumenFiles)
         SecureBoot = $sb
-        NeedsKey = $sb -and -not (Test-KeyEnrolled $cert)
+        # Approval is asked for even with Secure Boot off, so turning it on
+        # later doesn't stop Lumen from starting.
+        NeedsKey = -not $enrolled -and -not $script:UseBcdedit
         BitLocker = $bitlocker
     }
 }
@@ -390,7 +418,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
                 if ((Get-FileHash $from).Hash -ne (Get-FileHash $to).Hash) { throw "Couldn't write $to correctly." }
             }
             if (-not (Test-Path "$dir\lumen.conf")) {
-                $conf = if (Test-Path (Join-Path $Bundle 'lumen.conf')) { Get-Content -Raw (Join-Path $Bundle 'lumen.conf') } else { "timeout 5`r`ndefault last`r`n" }
+                $conf = if (Test-Path (Join-Path $Bundle 'lumen.conf')) { Get-Content -Raw (Join-Path $Bundle 'lumen.conf') } else { "default last`r`n" }
                 if ($state.BitLocker) {
                     # BitLocker measures the boot chain: let the firmware start
                     # Windows itself so it never asks for the recovery key.
@@ -701,7 +729,11 @@ function Start-Gui {
                 '',
                 'Your current setup is kept: Windows Boot Manager stays on the PC, and if Lumen ever has a problem the PC simply starts Windows as usual.'
             )
-            if ($state.SecureBoot) { $lines += ''; $lines += 'Secure Boot stays on. You will approve Lumen once on the next restart.' }
+            if ($state.NeedsKey) {
+                $lines += ''
+                $lines += $(if ($state.SecureBoot) { 'Secure Boot stays on. You will approve Lumen once on the next restart.' }
+                            else { 'You will approve Lumen once on the next restart, so it keeps working if you turn on Secure Boot later.' })
+            }
             if ($state.BitLocker) { $lines += ''; $lines += 'BitLocker detected: Windows will be started in a way that never asks for your recovery key.' }
             $verb = if ($state.Installed) { 'Update' } else { 'Install' }
             $choice = Show-Page $w "$verb Lumen" ($lines -join "`n") $verb $(if ($state.Installed) { 'Remove' } else { 'Cancel' })

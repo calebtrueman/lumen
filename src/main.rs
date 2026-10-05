@@ -30,6 +30,33 @@ use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::{system, CString16};
 
+// Entry point for the x86_64 build (targets/x86_64-lumen-uefi.json), which
+// uses SSE2 for floating point. The UEFI spec requires firmware to enable
+// SSE on x64, but some firmware forgets; a single SSE instruction would then
+// crash. So before any Rust code runs: if CR4.OSFXSR is clear, enable SSE
+// (CR4.OSFXSR|OSXMMEXCPT, CR0.EM off, CR0.MP on, default MXCSR), then jump
+// to the normal entry with the firmware's arguments (RCX, RDX) untouched.
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".globl lumen_entry",
+    "lumen_entry:",
+    "    mov rax, cr4",
+    "    test eax, 0x200",
+    "    jnz 2f",
+    "    or rax, 0x600",
+    "    mov cr4, rax",
+    "    mov rax, cr0",
+    "    and rax, -5",
+    "    or rax, 2",
+    "    mov cr0, rax",
+    "    sub rsp, 8",
+    "    mov dword ptr [rsp], 0x1f80",
+    "    ldmxcsr [rsp]",
+    "    add rsp, 8",
+    "2:",
+    "    jmp efi_main",
+);
+
 /// Secure Boot Advanced Targeting metadata. shim refuses to start a second
 /// stage without it; the generation number lets a vulnerable Lumen release be
 /// revoked without revoking the signing key.
@@ -69,6 +96,10 @@ struct Display {
     gop: ScopedProtocol<GraphicsOutput>,
     canvas: Canvas,
     backdrop: Vec<u32>,
+    /// What's currently on screen, so only changed areas are sent to the
+    /// graphics card (framebuffer writes are slow on real hardware). Empty
+    /// means unknown: the next present sends the whole frame.
+    shown: Vec<u32>,
 }
 
 impl Display {
@@ -94,7 +125,7 @@ impl Display {
                 let _ = gop.set_mode(&mode);
             }
         }
-        let mut d = Self { gop, canvas: Canvas::new(1, 1), backdrop: Vec::new() };
+        let mut d = Self { gop, canvas: Canvas::new(1, 1), backdrop: Vec::new(), shown: Vec::new() };
         d.sync_mode();
         Some(d)
     }
@@ -108,13 +139,63 @@ impl Display {
             gfx::render_backdrop(&mut self.canvas);
             self.backdrop = self.canvas.px.clone();
         }
+        // Something else (a loader that returned, a mode change) may have
+        // drawn on the screen since.
+        self.shown.clear();
     }
 
-    fn present(&mut self) {
+    /// Sends the canvas to the screen. Only the rows that changed since the
+    /// last present are sent, grouped into bands, each trimmed to the
+    /// columns that changed.
+    /// Returns how many pixels were sent.
+    fn present(&mut self) -> usize {
         let (w, h) = (self.canvas.w, self.canvas.h);
+        if self.shown.len() != w * h {
+            self.blit(0, 0, w, h);
+            self.shown = self.canvas.px.clone();
+            return w * h;
+        }
+        let mut sent = 0;
+        let mut y = 0;
+        while y < h {
+            let row = |y: usize| y * w..(y + 1) * w;
+            if self.canvas.px[row(y)] == self.shown[row(y)] {
+                y += 1;
+                continue;
+            }
+            // A band of consecutive changed rows and its changed columns.
+            let (mut x0, mut x1, y0) = (w, 0, y);
+            while y < h && self.canvas.px[row(y)] != self.shown[row(y)] {
+                let (new, old) = (&self.canvas.px[row(y)], &self.shown[row(y)]);
+                if let Some(first) = new.iter().zip(old).position(|(a, b)| a != b) {
+                    let last = w - 1 - new.iter().rev().zip(old.iter().rev()).position(|(a, b)| a != b).unwrap_or(0);
+                    x0 = x0.min(first);
+                    x1 = x1.max(last + 1);
+                }
+                y += 1;
+            }
+            self.blit(x0, y0, x1 - x0, y - y0);
+            sent += (x1 - x0) * (y - y0);
+            for yy in y0..y {
+                self.shown[yy * w + x0..yy * w + x1].copy_from_slice(&self.canvas.px[yy * w + x0..yy * w + x1]);
+            }
+        }
+        sent
+    }
+
+    fn blit(&mut self, x: usize, y: usize, bw: usize, bh: usize) {
+        if bw == 0 || bh == 0 {
+            return;
+        }
+        let w = self.canvas.w;
         // 0x00RRGGBB little-endian is byte-for-byte a BltPixel (B, G, R, x).
-        let buf = unsafe { core::slice::from_raw_parts(self.canvas.px.as_ptr().cast::<BltPixel>(), w * h) };
-        let _ = self.gop.blt(BltOp::BufferToVideo { buffer: buf, src: BltRegion::Full, dest: (0, 0), dims: (w, h) });
+        let buf = unsafe { core::slice::from_raw_parts(self.canvas.px.as_ptr().cast::<BltPixel>(), self.canvas.px.len()) };
+        let _ = self.gop.blt(BltOp::BufferToVideo {
+            buffer: buf,
+            src: BltRegion::SubRectangle { coords: (x, y), px_stride: w },
+            dest: (x, y),
+            dims: (bw, bh),
+        });
     }
 
     /// Fade the current frame to black.
@@ -125,7 +206,7 @@ impl Display {
             let t = ((clock::now() - t0) / 0.28) as f32;
             self.canvas.px.copy_from_slice(&frame);
             self.canvas.fade(1.0 - t.min(1.0));
-            self.present();
+            let _ = self.present();
             if t >= 1.0 {
                 break;
             }
@@ -139,7 +220,7 @@ impl Display {
             let t = ((clock::now() - t0) / dur) as f32;
             self.canvas.px.copy_from_slice(&frame);
             self.canvas.fade(t.min(1.0));
-            self.present();
+            let _ = self.present();
             if t >= 1.0 {
                 break;
             }
@@ -263,7 +344,9 @@ fn main() -> Status {
 
     // Timeout 0: boot straight away, unless a key is already being held.
     let key_held = system::with_stdin(|i| i.read_key().ok().flatten()).is_some();
-    if cfg.timeout == 0 && !key_held && !entries.is_empty() {
+    // The delay chosen with Lumen's Auto-start button wins over lumen.conf.
+    let timeout = launch::saved_auto_start().unwrap_or(cfg.timeout);
+    if timeout == 0 && !key_held && !entries.is_empty() {
         boot_entry(&mut display, &entries[sel], &cfg);
         display.sync_mode();
     }
@@ -271,8 +354,9 @@ fn main() -> Status {
     let mut text = text::Text::new();
     let mut ui = ui::Ui::new(entries, sel, launch::firmware_setup_supported(), clock::now());
     ui.show_clock = cfg.clock;
-    if cfg.timeout > 0 && !key_held {
-        ui.start_countdown(clock::now(), cfg.timeout as f64);
+    ui.set_auto_start(if timeout > 0 { timeout } else { -1 });
+    if timeout > 0 && !key_held {
+        ui.start_countdown(clock::now(), timeout as f64);
     }
 
     let mut mouse = mouse::Mouse::new(display.canvas.w, display.canvas.h);
@@ -282,6 +366,8 @@ fn main() -> Status {
     let timer = unsafe { boot::create_event(EventType::TIMER, Tpl::CALLBACK, None, None) }.expect("timer event");
     let _ = boot::set_timer(&timer, TimerTrigger::Periodic(Duration::from_micros(8333)));
     let mut last = clock::now();
+    let mut stats = (0.0f32, 0.0f32, 0.0f32); // draw ms, present ms, % sent
+    let mut last_full = clock::now();
 
     loop {
         let _ = boot::wait_for_event(&[unsafe { timer.unsafe_clone() }]);
@@ -333,9 +419,21 @@ fn main() -> Status {
                 ui.draw(&mut display.canvas, &display.backdrop, &mut text, clock::now(), 0.0);
                 display.fade_in(0.25);
             }
+            ui::Command::Act(ui::Action::AutoStart) => {
+                let secs = ui::next_auto_start(ui.auto_start);
+                launch::save_auto_start(secs);
+                ui.set_auto_start(secs);
+                let msg = if secs < 0 {
+                    String::from("Lumen will wait until you choose")
+                } else {
+                    format!("Lumen will start the last-used system after {secs} s")
+                };
+                ui.notify(msg, clock::now());
+            }
             ui::Command::Act(action) => {
                 display.fade_out();
                 match action {
+                    ui::Action::AutoStart => {}
                     ui::Action::Firmware => {
                         let s = launch::reboot_to_firmware();
                         ui.toast(format!("Couldn't open firmware settings ({s:?})"), clock::now());
@@ -358,9 +456,34 @@ fn main() -> Status {
             }
         }
 
-        if ui.update(dt, now) {
+        // Every couple of seconds, repaint and resend the whole screen in case
+        // something else (firmware text output, a driver) drew over it; only
+        // changed areas are sent otherwise.
+        let refresh = now - last_full >= 2.0;
+        if refresh {
+            last_full = now;
+            display.shown.clear();
+        }
+        if ui.update(dt, now) || refresh {
+            let t0 = clock::now();
             ui.draw(&mut display.canvas, &display.backdrop, &mut text, now, dt);
-            display.present();
+            let t1 = clock::now();
+            if cfg.debug {
+                // Timing readout (`debug on` in lumen.conf): last frame's draw
+                // and present times, and how much of the screen was sent.
+                let (cw, ch) = (display.canvas.w, display.canvas.h);
+                let line = format!(
+                    "{}x{}  draw {:.1} ms  present {:.1} ms  sent {:.0}%",
+                    cw, ch, stats.0, stats.1, stats.2
+                );
+                let size = 14.0 * ui::Ui::scale(cw, ch);
+                display.canvas.rrect(12.0, ch as f32 - size * 2.6, size * 26.0, size * 1.9, 6.0, gfx::rgb(0, 0, 0), 0.6);
+                text.draw(&mut display.canvas, text::Face::Body, size, &line, 22.0, ch as f32 - size * 1.15, gfx::rgb(255, 255, 255), 0.95);
+            }
+            let sent = display.present();
+            let t2 = clock::now();
+            let total = (display.canvas.w * display.canvas.h).max(1);
+            stats = (((t1 - t0) * 1000.0) as f32, ((t2 - t1) * 1000.0) as f32, sent as f32 * 100.0 / total as f32);
         }
     }
 }

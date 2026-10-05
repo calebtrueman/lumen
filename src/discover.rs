@@ -297,6 +297,30 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
         let is_self_volume = Some(handle) == me.device;
         let mut found = Vec::new();
 
+        // The removable-media fallback loader.
+        let fallback = format!("\\EFI\\BOOT\\BOOT{}.EFI", ARCH.to_uppercase());
+        // Lumen itself may live in \EFI\BOOT (as the fallback loader or
+        // behind shim there); never list ourselves.
+        let is_self = is_self_volume && own_dir == "\\efi\\boot";
+
+        // A USB stick or other removable drive is one thing to boot: the
+        // loader it's designed to start from. Live and installer media often
+        // also carry their base distro's folder (Bazzite's has \EFI\fedora),
+        // which must not show up as a separate, wrongly named OS.
+        if vol.removable && !is_self && vol.exists(&fallback) {
+            let label = vol.label.trim().to_string();
+            let (title, icon) = match vol.identify_contents("\\EFI\\BOOT") {
+                Some((o, true)) => (format!("{} Setup (USB)", o.name), o.icon),
+                Some((o, false)) => (format!("{} (USB)", o.name), o.icon),
+                None if !generic_label(&label) => (label, os::DRIVE),
+                None => ("USB Drive".into(), os::DRIVE),
+            };
+            found.push(vol.entry(title, fallback, icon, None, true));
+            volumes.push(vol);
+            entries.extend(found);
+            continue;
+        }
+
         if vol.exists("\\EFI\\Microsoft\\Boot\\bootmgfw.efi") {
             found.push(vol.entry("Windows".into(), "\\EFI\\Microsoft\\Boot\\bootmgfw.efi".into(), os::WINDOWS, None, false));
         }
@@ -365,23 +389,15 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
             }
         }
 
-        // The removable-media fallback loader: live/installer USBs, rescue
-        // sticks, or an internal disk with nothing else recognisable on it.
-        let fallback = format!("\\EFI\\BOOT\\BOOT{}.EFI", ARCH.to_uppercase());
-        // Lumen itself may live in \EFI\BOOT (as the fallback loader or
-        // behind shim there); never list ourselves.
-        let is_self = is_self_volume && own_dir == "\\efi\\boot";
-        if !is_self && (vol.removable || found.is_empty()) && vol.exists(&fallback) {
-            let label = vol.label.trim().to_string();
-            let usb = if vol.removable { " (USB)" } else { "" };
+        // An internal disk with nothing else recognisable on it may still have
+        // the fallback loader.
+        if !is_self && found.is_empty() && vol.exists(&fallback) {
             let (title, icon) = match vol.identify_contents("\\EFI\\BOOT") {
-                Some((o, true)) => (format!("{} Setup{usb}", o.name), o.icon),
-                Some((o, false)) => (format!("{}{usb}", o.name), o.icon),
-                None if vol.removable && !generic_label(&label) => (label, os::DRIVE),
-                None if vol.removable => ("USB Drive".into(), os::DRIVE),
+                Some((o, true)) => (format!("{} Setup", o.name), o.icon),
+                Some((o, false)) => (o.name.to_string(), o.icon),
                 None => ("Boot Loader".into(), os::DRIVE),
             };
-            found.push(vol.entry(title, fallback, icon, None, vol.removable));
+            found.push(vol.entry(title, fallback, icon, None, false));
         }
 
         volumes.push(vol);

@@ -30,6 +30,21 @@ ESP=$(find_esp) || exit 0
 [ -f "$ESP/EFI/lumen/shim$S.efi" ] || exit 0
 
 healthy() { [ -e /sys/firmware/efi/efivars/LumenHealthy-4c756d65-6e00-4b6f-9f2a-6c756d656e21 ]; }
+sb_on() { od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>/dev/null | awk 'NF { v = $NF } END { exit !(v == 1) }'; }
+hexof() { od -An -tx1 -v "$1" | tr -d ' \n'; }
+# Under Secure Boot, shim only starts Lumen if its key was approved. A queued
+# approval counts: its screen appears on the next boot, which must go ahead.
+can_start() {
+    sb_on || return 0
+    cer="$ESP/EFI/lumen/lumen.cer"
+    [ -f "$cer" ] || return 0
+    want=$(hexof "$cer")
+    for v in MokListRT MokNew; do
+        f=/sys/firmware/efi/efivars/$v-605dab50-e046-4300-abb6-3dd810dd8b23
+        [ -e "$f" ] && hexof "$f" | grep -q "$want" && return 0
+    done
+    return 1
+}
 
 num=$(efibootmgr | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Lumen\([[:space:]].*\)\{0,1\}$/\1/p' | head -n1)
 if [ -z "$num" ]; then
@@ -40,10 +55,22 @@ if [ -z "$num" ]; then
     # --create puts the new entry first in BootOrder.
     efibootmgr --quiet --create --disk "$disk" --part "$part" --label Lumen --loader "\\EFI\\lumen\\shim$S.efi"
     echo "lumen-heal: recreated the Lumen boot entry"
-    if ! healthy && [ -n "$old" ]; then
+    if { ! healthy || ! can_start; } && [ -n "$old" ]; then
         num=$(efibootmgr | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Lumen\([[:space:]].*\)\{0,1\}$/\1/p' | head -n1)
         efibootmgr --quiet --bootorder "$old,$num"
     fi
+    exit 0
+fi
+if ! can_start; then
+    # Secure Boot was turned on without approving Lumen's key: don't let every
+    # boot stop at shim's "Verification failed" screen.
+    order=$(efibootmgr | sed -n 's/^BootOrder: //p')
+    if [ "${order%%,*}" = "$num" ]; then
+        rest=$(echo "$order" | tr ',' '\n' | grep -vix "$num" | paste -sd, -)
+        efibootmgr --quiet --bootorder "${rest:+$rest,}$num"
+        echo "lumen-heal: Secure Boot is on but Lumen isn't approved; the PC starts its next entry until the installer is run again"
+    fi
+    [ "$(efibootmgr | sed -n 's/^BootNext: //p')" = "$num" ] && efibootmgr --quiet --delete-bootnext
     exit 0
 fi
 healthy || exit 0

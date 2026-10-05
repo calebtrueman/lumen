@@ -164,3 +164,19 @@ pub fn heal_boot_order() {
         log::info!("moved Boot{cur:04X} (Lumen) back to the front of BootOrder");
     }
 }
+
+/// The auto-start delay chosen in Lumen's menu (seconds, -1 = off), kept in
+/// NVRAM so it survives reinstalls and overrides `timeout` in lumen.conf.
+pub fn saved_auto_start() -> Option<i32> {
+    let (data, _) = runtime::get_variable_boxed(cstr16!("LumenAutoStart"), &VENDOR).ok()?;
+    Some(i32::from_le_bytes(data.get(..4)?.try_into().ok()?))
+}
+
+pub fn save_auto_start(secs: i32) {
+    let _ = runtime::set_variable(
+        cstr16!("LumenAutoStart"),
+        &VENDOR,
+        VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
+        &secs.to_le_bytes(),
+    );
+}

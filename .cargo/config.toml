@@ -1,2 +1,11 @@
 [build]
 target = "x86_64-unknown-uefi"
+
+
+# Release builds of Lumen for x86_64 PCs: `cargo efi-x64`. Rust's built-in
+# x86_64-unknown-uefi target uses software floating point, which made every
+# per-pixel calculation an emulated call (hundreds of ms per frame on real
+# hardware); this target uses SSE2. See targets/x86_64-lumen-uefi.json and
+# the entry stub in src/main.rs, which makes sure SSE is switched on first.
+[alias]
+efi-x64 = ["build", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc,compiler_builtins", "-Zbuild-std-features=compiler-builtins-mem", "--target", "targets/x86_64-lumen-uefi.json"]

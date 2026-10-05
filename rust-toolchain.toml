@@ -1,0 +1,7 @@
+# Pinned nightly: the x86_64 build recompiles Rust's core library for the
+# custom SSE2 target in targets/ (-Z build-std), which needs nightly.
+[toolchain]
+channel = "nightly-2026-10-04"
+components = ["rust-src"]
+targets = ["x86_64-unknown-uefi", "aarch64-unknown-uefi", "x86_64-pc-windows-gnu"]
+profile = "minimal"
