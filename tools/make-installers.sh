@@ -6,6 +6,12 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# Ask for the signing key's passphrase once for both architectures.
+if [ "${LUMEN_TEST_KEY:-}" != 1 ] && grep -q "ENCRYPTED PRIVATE KEY" keys/lumen.key 2>/dev/null && [ -z "${LUMEN_KEY_PASS:-}" ]; then
+    printf 'Passphrase for the Lumen signing key: ' >&2
+    stty -echo 2>/dev/null || true; read -r LUMEN_KEY_PASS; stty echo 2>/dev/null || true; echo >&2
+    export LUMEN_KEY_PASS
+fi
 tools/dist.sh x86_64
 tools/dist.sh aarch64
 [ -f assets/lumen.ico ] || python3 tools/make_icon.py

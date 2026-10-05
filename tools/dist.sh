@@ -14,7 +14,7 @@ OUT=dist/$ARCH
 
 if [ "${LUMEN_TEST_KEY:-}" = 1 ]; then
     KEYS=keys-test
-    [ -f "$KEYS/lumen.key" ] || tools/genkey.sh "$KEYS"
+    tools/genkey.sh --test "$KEYS"
     echo "WARNING: test build signed with a throwaway key; don't install it on a real PC." >&2
 else
     KEYS=keys
@@ -32,10 +32,17 @@ else
             exit 1
         fi
     done
-    key_pub=$(openssl pkey -in "$KEYS/lumen.key" -pubout 2>/dev/null)
+    # The passphrase-protected release key is unlocked once per
+    # build: from LUMEN_KEY_PASS, or by asking.
+    if grep -q "ENCRYPTED PRIVATE KEY" "$KEYS/lumen.key" && [ -z "${LUMEN_KEY_PASS:-}" ]; then
+        printf 'Passphrase for the Lumen signing key: ' >&2
+        stty -echo 2>/dev/null || true; read -r LUMEN_KEY_PASS; stty echo 2>/dev/null || true; echo >&2
+    fi
+    export LUMEN_KEY_PASS="${LUMEN_KEY_PASS:-}"
+    key_pub=$(openssl pkey -in "$KEYS/lumen.key" -passin env:LUMEN_KEY_PASS -pubout 2>/dev/null)
     cert_pub=$(openssl x509 -inform DER -in release/lumen.cer -noout -pubkey)
     if [ "$key_pub" != "$cert_pub" ]; then
-        echo "keys/lumen.key doesn't belong to the release certificate; refusing to sign." >&2
+        echo "keys/lumen.key doesn't belong to the release certificate (or the passphrase is wrong); refusing to sign." >&2
         exit 1
     fi
 fi
@@ -43,7 +50,15 @@ fi
 cargo build --release --target "$ARCH-unknown-uefi"
 
 rm -rf "$OUT" && mkdir -p "$OUT"
-osslsigncode sign -h sha256 -certs "$KEYS/lumen.crt" -key "$KEYS/lumen.key" \
+# The passphrase goes through a private temp file, not the command line.
+set --
+if grep -q "ENCRYPTED PRIVATE KEY" "$KEYS/lumen.key"; then
+    PASSFILE=$(umask 077; mktemp)
+    trap 'rm -f "$PASSFILE"' EXIT
+    printf '%s' "${LUMEN_KEY_PASS:-}" > "$PASSFILE"
+    set -- -readpass "$PASSFILE"
+fi
+osslsigncode sign -h sha256 -certs "$KEYS/lumen.crt" -key "$KEYS/lumen.key" "$@" \
     -in "target/$ARCH-unknown-uefi/release/lumen.efi" -out "$OUT/lumen.efi" >/dev/null
 cp "vendor/shim/$ARCH/shim$S.efi" "vendor/shim/$ARCH/mm$S.efi" "$KEYS/lumen.cer" "$OUT/"
 cp install/install-linux.sh install/lumen-heal.sh install/mok-request.sh install/lumen-windows.ps1 install/lumen.conf "$OUT/"

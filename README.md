@@ -210,14 +210,36 @@ tools/make-installers.sh                # -> dist/Lumen-Installer-{Windows.exe,L
 This builds both architectures, signs Lumen with `keys/lumen.key`, and embeds
 Debian's Microsoft-signed shim, fetched with pinned hashes.
 
-> **Signing key:** PCs that approved Lumen under Secure Boot trust exactly one
-> key: the private half of [`release/lumen.cer`](release/README.md), kept in
-> `keys/lumen.key` (git-ignored, never committed). Every release must be signed
-> with it, so `tools/dist.sh` refuses to build if it's missing or doesn't match
-> the committed certificate, and `tools/genkey.sh` won't replace it. **Keep a
-> backup** (e.g. in a password manager): if it's lost, every PC has to approve
-> a new key. Test builds (CI) use `LUMEN_TEST_KEY=1`, which signs with a
-> separate throwaway key; never install those on a real PC.
+### Signing key
+
+This works like rEFInd and other open-source boot projects. The code is
+public, but releases are signed with a private key that's never in the repo.
+
+- PCs that approved Lumen under Secure Boot trust exactly one key: the
+  private half of [`release/lumen.cer`](release/README.md).
+- A clone or fork can build Lumen, but can't sign as this project. Forks sign
+  with their own key (`tools/genkey.sh --new-project`), and users of that fork
+  approve that key instead.
+
+| Task | Command |
+| --- | --- |
+| Create or replace the release key (RSA-4096, passphrase-protected) | `tools/genkey.sh --rotate` |
+| Print a paper backup (QR codes + text, no passphrase on it) | `python3 tools/key-backup-sheet.py` |
+| Restore from the paper backup or a key file | `tools/restore-key.sh FILE` |
+| Build signed release installers (asks for the passphrase once) | `tools/make-installers.sh` |
+
+`tools/dist.sh` refuses to sign with anything that doesn't match the
+committed `release/lumen.cer`, and `genkey.sh` never replaces a key without
+`--rotate`.
+
+**Keep:**
+1. the passphrase in your password manager;
+2. the printed sheet somewhere safe;
+3. a copy of the encrypted `keys/lumen.key` as an attachment in your password
+   manager.
+
+Test builds (CI) use `LUMEN_TEST_KEY=1`, which signs with a separate throwaway
+key; never install those on a real PC.
 
 > **Windows SmartScreen:** until the `.exe` is Authenticode-signed with a code
 > signing certificate, Windows shows *"Windows protected your PC"*. Click

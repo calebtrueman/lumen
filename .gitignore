@@ -2,6 +2,7 @@
 /dist
 /keys
 /keys-test
+/keys-retired-*
 /vendor/shim
 /tools/gallery/target
 /installer/*/target
