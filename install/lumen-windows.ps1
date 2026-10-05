@@ -139,10 +139,19 @@ public static class LumenFw {
 $script:UseBcdedit = $false
 function Initialize-FirmwareAccess {
     $priv = [LumenFw]::EnablePrivilege()
-    $null = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
-    if ([LumenFw]::LastGetError -in 1314, 5, 1) {
+    # Probe both the boot order and an actual boot entry: some systems allow
+    # one but not the other.
+    $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
+    $err = [LumenFw]::LastGetError
+    if ($order) {
+        $null = [LumenFw]::Get(('Boot{0:X4}' -f [BitConverter]::ToUInt16($order, 0)), [LumenFw]::GlobalGuid)
+        $err = [LumenFw]::LastGetError
+    }
+    if (-not $order -or $err -ne 0) {
         $script:UseBcdedit = $true
-        Write-Log "Direct firmware variable access unavailable (privilege $priv, read error $([LumenFw]::LastGetError)); using bcdedit."
+        Write-Log "Direct firmware variable access unavailable (privilege $priv, read error $err); using bcdedit."
+    } else {
+        Write-Log 'Using direct firmware variable access.'
     }
 }
 
@@ -643,6 +652,10 @@ if ($Diagnose) {
     "Firmware type: $env:firmware_type   OS arch: $OsArch   Secure Boot: $(Test-SecureBoot)"
     $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
     "BootOrder read: $(if ($order) { ($order.Length / 2).ToString() + ' entries' } else { 'failed, error ' + [LumenFw]::LastGetError })"
+    foreach ($v in 'BootCurrent', 'Timeout', 'SecureBoot', 'OsIndicationsSupported', 'PlatformLang') {
+        $d = [LumenFw]::Get($v, [LumenFw]::GlobalGuid)
+        "${v}: $(if ($d) { "$($d.Length) bytes" } else { "error $([LumenFw]::LastGetError)" })"
+    }
     foreach ($n in @(Get-BootOrder) + @(0, 1, 2, 3, 0x80)) {
         $d = Get-BootDescription $n
         'Boot{0:X4}: {1}' -f $n, $(if ($d) { $d } else { "(none, error $([LumenFw]::LastGetError))" })
