@@ -7,9 +7,24 @@ set -eu
 cd "$(dirname "$0")/.."
 
 # Ask for the signing key's passphrase once for both architectures.
+# In a terminal it's typed at a hidden prompt; without one (e.g. run from an
+# editor or agent) macOS shows a password dialog instead.
 if [ "${LUMEN_TEST_KEY:-}" != 1 ] && grep -q "ENCRYPTED PRIVATE KEY" keys/lumen.key 2>/dev/null && [ -z "${LUMEN_KEY_PASS:-}" ]; then
-    printf 'Passphrase for the Lumen signing key: ' >&2
-    stty -echo 2>/dev/null || true; read -r LUMEN_KEY_PASS; stty echo 2>/dev/null || true; echo >&2
+    if [ -t 0 ]; then
+        printf 'Passphrase for the Lumen signing key: ' >&2
+        stty -echo 2>/dev/null || true; read -r LUMEN_KEY_PASS; stty echo 2>/dev/null || true; echo >&2
+    elif command -v osascript >/dev/null; then
+        LUMEN_KEY_PASS=$(osascript -e 'text returned of (display dialog "Passphrase for the Lumen release signing key:" with title "Sign Lumen release" default answer "" with hidden answer buttons {"Cancel", "Sign"} default button "Sign" with icon caution)' 2>/dev/null) ||
+            { echo "Signing cancelled." >&2; exit 1; }
+    else
+        echo "Set LUMEN_KEY_PASS or run this in a terminal to enter the signing passphrase." >&2
+        exit 1
+    fi
+    # Check it now rather than after a long build.
+    if ! LUMEN_KEY_PASS=$LUMEN_KEY_PASS openssl pkey -in keys/lumen.key -passin env:LUMEN_KEY_PASS -noout 2>/dev/null; then
+        echo "That passphrase doesn't unlock keys/lumen.key." >&2
+        exit 1
+    fi
     export LUMEN_KEY_PASS
 fi
 tools/dist.sh x86_64
