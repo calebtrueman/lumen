@@ -89,12 +89,14 @@ public static class LumenFw {
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
 
-    public static void EnablePrivilege() {
+    /// Returns 0 on success, or 1300 if the account doesn't hold the privilege.
+    public static int EnablePrivilege() {
         IntPtr token;
         if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
         TokenPrivileges tp = new TokenPrivileges { Count = 1, Attributes = 2 };
         if (!LookupPrivilegeValueW(null, "SeSystemEnvironmentPrivilege", out tp.Luid)) throw new Win32Exception();
         if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+        return Marshal.GetLastWin32Error();
     }
 
     /// Last error from Get (203 = variable not found).
@@ -130,6 +132,32 @@ public static class LumenFw {
 '@
 
 # ---- firmware boot entries ------------------------------------------------
+
+# Some machines (locked-down accounts, some VMs) can't read or write firmware
+# variables directly even as administrator, while Windows' own bcdedit still
+# can manage boot entries. Detect that and do everything through bcdedit.
+$script:UseBcdedit = $false
+function Initialize-FirmwareAccess {
+    $priv = [LumenFw]::EnablePrivilege()
+    $null = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
+    if ([LumenFw]::LastGetError -in 1314, 5, 1) {
+        $script:UseBcdedit = $true
+        Write-Log "Direct firmware variable access unavailable (privilege $priv, read error $([LumenFw]::LastGetError)); using bcdedit."
+    }
+}
+
+# The firmware entry's bcdedit identifier, found by its description. Only
+# the GUID and our own description text are matched, so it's locale-proof.
+function Find-LumenBcdId {
+    $text = bcdedit /enum firmware 2>$null | Out-String
+    foreach ($block in ($text -split '(\r?\n){2,}')) {
+        if ($block -match '(?m)\s{2,}Lumen\s*$') {
+            $m = [regex]::Match($block, '\{[0-9a-fA-F-]{36}\}')
+            if ($m.Success) { return $m.Value }
+        }
+    }
+    $null
+}
 
 function Get-BootOrder {
     $b = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
@@ -303,8 +331,11 @@ function Get-InstallState {
     [byte[]]$cert = [IO.File]::ReadAllBytes((Join-Path $Bundle 'lumen.cer'))
     $bitlocker = $false
     try { $bitlocker = (Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop).ProtectionStatus -eq 'On' } catch {}
+    if ($script:UseBcdedit -and $sb) {
+        throw "Secure Boot is on, but this account can't change firmware settings, which the one-time Secure Boot approval needs. Run the installer from a regular administrator account."
+    }
     @{
-        Installed = ($null -ne (Find-LumenEntry)) -or (Test-LumenFiles)
+        Installed = ($(if ($script:UseBcdedit) { [bool](Find-LumenBcdId) } else { $null -ne (Find-LumenEntry) })) -or (Test-LumenFiles)
         SecureBoot = $sb
         NeedsKey = $sb -and -not (Test-KeyEnrolled $cert)
         BitLocker = $bitlocker
@@ -312,7 +343,7 @@ function Get-InstallState {
 }
 
 function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
-    $created = @{ Dir = $false; Entry = $null; Order = @(Get-BootOrder) }
+    $created = @{ Dir = $false; Entry = $null; BcdId = $null; Order = @(if (-not $script:UseBcdedit) { Get-BootOrder }) }
     try {
         & $progress 'Copying Lumen to the EFI system partition…'
         Use-Esp {
@@ -346,6 +377,24 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
         Write-Log "Copied Lumen $Version files."
 
         & $progress 'Adding Lumen to the boot menu…'
+        if ($script:UseBcdedit) {
+            $id = Find-LumenBcdId
+            if (-not $id) {
+                $out = bcdedit /copy '{bootmgr}' /d $Label 2>&1 | Out-String
+                $id = [regex]::Match($out, '\{[0-9a-fA-F-]{36}\}').Value
+                if (-not $id) { throw "Windows couldn't create a boot entry: $out" }
+                $created.BcdId = $id
+                bcdedit /set $id path $Loader | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "Windows couldn't point the boot entry at Lumen." }
+                Write-Log "Created boot entry $id via bcdedit."
+            }
+            # Can't read LumenHealthy here, so never promote: try it next boot
+            # only; the SYSTEM heal task promotes it once Lumen has run.
+            bcdedit /set '{fwbootmgr}' displayorder $id /addlast | Out-Null
+            bcdedit /set '{fwbootmgr}' bootsequence $id | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Windows couldn't schedule Lumen for the next boot." }
+            Write-Log 'Lumen will be tried on the next boot; the default stays unchanged until it has started once.'
+        } else {
         $num = Find-LumenEntry
         if ($null -eq $num) {
             $num = New-LumenEntry
@@ -359,6 +408,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
             Set-BootOrder ($rest + @($num))
             Set-BootNext $num
             Write-Log 'Lumen will be tried on the next boot; the default stays unchanged until it has started once.'
+        }
         }
 
         & $progress 'Setting up automatic repair after updates…'
@@ -381,6 +431,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
         Write-Log "Install failed: $($_.Exception.Message). Rolling back."
         try {
             if ($null -ne $created.Entry) { Remove-LumenEntry $created.Entry }
+            if ($created.BcdId) { bcdedit /delete $created.BcdId | Out-Null }
             if ($created.Order.Count -gt 0) { Set-BootOrder $created.Order }
             if ($created.Dir) { Use-Esp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue } }
         } catch { Write-Log "Rollback problem: $($_.Exception.Message)" }
@@ -427,7 +478,11 @@ function Register-Uninstaller {
 
 function Invoke-Uninstall {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    $num = Find-LumenEntry
+    if ($script:UseBcdedit) {
+        $id = Find-LumenBcdId
+        if ($id) { bcdedit /delete $id | Out-Null }
+    }
+    $num = if ($script:UseBcdedit) { $null } else { Find-LumenEntry }
     if ($null -ne $num) {
         $next = [LumenFw]::Get('BootNext', [LumenFw]::GlobalGuid)
         if ($next -and [BitConverter]::ToUInt16($next, 0) -eq $num) { [LumenFw]::Set('BootNext', [LumenFw]::GlobalGuid, $null, [LumenFw]::NvBsRt) }
@@ -531,7 +586,7 @@ function Start-Gui {
     $w = New-Window
     try {
         Test-Preflight
-        [LumenFw]::EnablePrivilege()
+        Initialize-FirmwareAccess
         $state = if ($Uninstall) { $null } else { Get-InstallState }
         $remove = [bool]$Uninstall
         if (-not $remove) {
@@ -584,7 +639,7 @@ function Start-Gui {
 
 if ($Diagnose) {
     # Support aid: shows what the installer sees, changes nothing.
-    try { [LumenFw]::EnablePrivilege(); 'Privilege: enabled' } catch { "Privilege: $($_.Exception.Message)" }
+    try { "Privilege: $(if ([LumenFw]::EnablePrivilege() -eq 0) { 'enabled' } else { 'not held by this account' })" } catch { "Privilege: $($_.Exception.Message)" }
     "Firmware type: $env:firmware_type   OS arch: $OsArch   Secure Boot: $(Test-SecureBoot)"
     $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
     "BootOrder read: $(if ($order) { ($order.Length / 2).ToString() + ' entries' } else { 'failed, error ' + [LumenFw]::LastGetError })"
@@ -597,13 +652,13 @@ if ($Diagnose) {
     return
 }
 if ($Heal) {
-    try { [LumenFw]::EnablePrivilege(); Invoke-Heal } catch { Write-Log "Heal: $($_.Exception.Message)" }
+    try { [void][LumenFw]::EnablePrivilege(); Invoke-Heal } catch { Write-Log "Heal: $($_.Exception.Message)" }
     return
 }
 if ($Gui) { Start-Gui; return }
 
 Test-Preflight
-[LumenFw]::EnablePrivilege()
+Initialize-FirmwareAccess
 if ($Uninstall) { Invoke-Uninstall; Write-Output 'Lumen removed. Your PC will start the way it did before.'; return }
 $state = Get-InstallState
 if (-not $Yes) {
