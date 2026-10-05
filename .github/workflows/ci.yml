@@ -16,17 +16,17 @@ jobs:
           rustup target add x86_64-unknown-uefi aarch64-unknown-uefi x86_64-pc-windows-gnu
           sudo apt-get update -qq
           sudo apt-get install -y -qq osslsigncode mingw-w64 >/dev/null
-      - name: Build (signed with a throwaway CI key)
-        run: |
-          tools/genkey.sh keys
-          tools/make-installers.sh
+      - name: Build (signed with a throwaway test key, not the release key)
+        env:
+          LUMEN_TEST_KEY: "1"
+        run: tools/make-installers.sh
       - name: Installer byte-level checks
         run: python3 tools/test/check_windows_installer.py pwsh
       - name: Shell syntax
         run: for f in install/*.sh; do sh -n "$f"; done
       - uses: actions/upload-artifact@v4
         with:
-          name: installers
+          name: installers-TEST-KEY-do-not-install
           path: |
             dist/Lumen-Installer-Windows.exe
             dist/Lumen-Installer-Linux.run
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: installers
+          name: installers-TEST-KEY-do-not-install
       - name: Run the real installer silently and verify
         shell: powershell
         run: |

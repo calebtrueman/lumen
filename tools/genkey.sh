@@ -4,6 +4,10 @@
 # KEEP lumen.key PRIVATE: anything signed with it boots on enrolled machines.
 set -eu
 DIR=${1:-keys}
+if [ -e "$DIR/lumen.key" ]; then
+    echo "$DIR/lumen.key already exists; refusing to replace it (PCs that approved it would stop trusting new builds)." >&2
+    exit 1
+fi
 mkdir -p "$DIR"
 umask 077
 openssl req -new -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \

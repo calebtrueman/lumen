@@ -210,10 +210,14 @@ tools/make-installers.sh                # -> dist/Lumen-Installer-{Windows.exe,L
 This builds both architectures, signs Lumen with `keys/lumen.key`, and embeds
 Debian's Microsoft-signed shim, fetched with pinned hashes.
 
-> **Signing key:** `tools/genkey.sh` creates `keys/lumen.key` on first build.
-> Anything signed with it boots on machines that approved `lumen.cer`, so for
-> real releases keep it offline/in an HSM and never commit it (`/keys` is
-> git-ignored). CI signs with a throwaway key.
+> **Signing key:** PCs that approved Lumen under Secure Boot trust exactly one
+> key: the private half of [`release/lumen.cer`](release/README.md), kept in
+> `keys/lumen.key` (git-ignored, never committed). Every release must be signed
+> with it, so `tools/dist.sh` refuses to build if it's missing or doesn't match
+> the committed certificate, and `tools/genkey.sh` won't replace it. **Keep a
+> backup** (e.g. in a password manager): if it's lost, every PC has to approve
+> a new key. Test builds (CI) use `LUMEN_TEST_KEY=1`, which signs with a
+> separate throwaway key; never install those on a real PC.
 
 > **Windows SmartScreen:** until the `.exe` is Authenticode-signed with a code
 > signing certificate, Windows shows *"Windows protected your PC"*. Click

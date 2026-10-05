@@ -1,6 +1,7 @@
 /target
 /dist
 /keys
+/keys-test
 /vendor/shim
 /tools/gallery/target
 /installer/*/target
