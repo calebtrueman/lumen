@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Lumen and installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup target add x86_64-unknown-uefi aarch64-unknown-uefi x86_64-pc-windows-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode mingw-w64 >/dev/null
+      - name: Build (signed with a throwaway CI key)
+        run: |
+          tools/genkey.sh keys
+          tools/make-installers.sh
+      - name: Installer byte-level checks
+        run: python3 tools/test/check_windows_installer.py pwsh
+      - name: Shell syntax
+        run: for f in install/*.sh; do sh -n "$f"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: |
+            dist/Lumen-Installer-Windows.exe
+            dist/Lumen-Installer-Linux.run
+            dist/SHA256SUMS
+
+  windows-install:
+    name: Install / heal / uninstall on Windows
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+      - name: Run the real installer silently and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "Firmware: $env:firmware_type"
+          if ($env:firmware_type -ne 'UEFI') { "::warning::This runner boots in BIOS mode; can't exercise firmware boot entries."; exit 0 }
+          try { "Secure Boot: $(Confirm-SecureBootUEFI)" } catch { "Secure Boot: unsupported" }
+          $before = bcdedit /enum firmware | Out-String
+
+          $p = Start-Process .\Lumen-Installer-Windows.exe -ArgumentList '/quiet' -Wait -PassThru
+          Get-Content "$env:ProgramData\Lumen\install.log"
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+
+          function Check($ok, $what) { if ($ok) { "PASS $what" } else { throw "FAIL $what" } }
+          mountvol S: /S
+          foreach ($f in 'shimx64.efi', 'mmx64.efi', 'grubx64.efi', 'lumen.cer', 'lumen.conf') { Check (Test-Path "S:\EFI\lumen\$f") "ESP has $f" }
+          mountvol S: /D
+          $fw = bcdedit /enum firmware | Out-String
+          $fw
+          Check ($fw -match 'description\s+Lumen') 'firmware boot entry "Lumen" exists'
+          $mgr = bcdedit /enum '{fwbootmgr}' | Out-String
+          Check ($mgr -match 'bootsequence') 'Lumen scheduled as next boot only (BootNext)'
+          Check ((Get-ScheduledTask -TaskName 'Lumen boot order').State -ne $null) 'heal task registered'
+          Check (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Lumen') 'listed in Apps & features'
+
+          Start-ScheduledTask -TaskName 'Lumen boot order'; Start-Sleep 15
+          Check ((Get-ScheduledTaskInfo -TaskName 'Lumen boot order').LastTaskResult -eq 0) 'heal task runs cleanly'
+
+          $p = Start-Process .\Lumen-Installer-Windows.exe -ArgumentList '/quiet','/uninstall' -Wait -PassThru
+          Check ($p.ExitCode -eq 0) 'uninstall exit code 0'
+          Start-Sleep 5
+          Check (-not ((bcdedit /enum firmware | Out-String) -match 'description\s+Lumen')) 'boot entry removed'
+          Check (-not (Get-ScheduledTask -TaskName 'Lumen boot order' -ErrorAction SilentlyContinue)) 'heal task removed'
+          Check (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Lumen')) 'Apps & features entry removed'
+          mountvol S: /S
+          Check (-not (Test-Path 'S:\EFI\lumen')) 'ESP files removed'
+          mountvol S: /D

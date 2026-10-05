@@ -1,55 +1,235 @@
 #!/bin/sh
-# Install Lumen from Linux:   sudo ./install-linux.sh
+# Lumen installer for Linux.
 #
-# - Copies Lumen, Microsoft-signed shim and MokManager to \EFI\lumen\ on the
-#   EFI system partition, and adds a firmware boot entry "Lumen" first in
-#   the boot order. Existing entries (GRUB, Windows Boot Manager) are left
-#   alone, so if Lumen can't start the firmware simply boots the next one.
-# - Secure Boot: queues Lumen's certificate for enrollment (one-time
-#   confirmation on the next boot).
-# - Installs lumen-heal so updates can't push Lumen out of first place.
+#   sudo ./install-linux.sh                  install or update (asks before changing anything)
+#   sudo ./install-linux.sh --uninstall      remove Lumen completely
+#
+# Options used by the one-click installer: --yes (don't ask), --code NNNN
+# (Secure Boot approval code), --result FILE (write key=value results).
+#
+# What it does, and why it can't leave the PC unbootable:
+#  * Copies Lumen, Microsoft-signed shim and MokManager to \EFI\lumen\ on the
+#    EFI system partition. Nothing that's already there is modified.
+#  * Adds a firmware boot entry "Lumen" and makes it the *next* boot only.
+#    The default stays as it was until Lumen has started successfully on this
+#    PC once; Lumen then makes itself the default. If that first start fails
+#    for any reason, the PC simply keeps booting the way it always has.
+#  * Under Secure Boot, queues Lumen's key for a one-time approval on the
+#    blue "Shim UEFI key management" screen.
+#  * Installs lumen-heal so OS and firmware updates can't push Lumen out.
+#  * Any failure undoes everything this run changed.
 set -eu
-HERE=$(cd "$(dirname "$0")" && pwd)
-die() { echo "error: $*" >&2; exit 1; }
+umask 022
 
-[ "$(id -u)" -eq 0 ] || die "please run with sudo"
-[ -d /sys/firmware/efi ] || die "this system wasn't booted in UEFI mode; Lumen needs UEFI"
-command -v efibootmgr >/dev/null || die "please install efibootmgr first"
+HERE=$(cd "$(dirname "$0")" && pwd)
+VENDOR_GUID=4c756d65-6e00-4b6f-9f2a-6c756d656e21
+SHIM_GUID=605dab50-e046-4300-abb6-3dd810dd8b23
+EFIVARS=/sys/firmware/efi/efivars
+YES=0
+CODE=""
+MODE=install
+RESULT=""
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --yes) YES=1 ;;
+        --code) CODE=$2; shift ;;
+        --uninstall) MODE=uninstall ;;
+        --result) RESULT=$2; shift ;;
+        *) echo "unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+say() { echo "lumen: $*"; }
+result() { if [ -n "$RESULT" ]; then echo "$1" >> "$RESULT"; fi; }
+die() {
+    echo "lumen: error: $*" >&2
+    result "error=$*"
+    exit 1
+}
+[ -z "$RESULT" ] || : > "$RESULT"
+
+# ---- preflight -----------------------------------------------------------------
+
+[ "$(id -u)" -eq 0 ] || die "please run as root (sudo)"
+[ -d /sys/firmware/efi ] || die "this PC started Linux in legacy BIOS mode. Lumen needs UEFI mode (switch it in your firmware settings)."
 case $(uname -m) in
     x86_64) S=x64 ;;
     aarch64) S=aa64 ;;
-    *) die "unsupported CPU $(uname -m)" ;;
+    *) die "unsupported processor $(uname -m)" ;;
 esac
-for f in lumen.efi "shim$S.efi" "mm$S.efi" lumen.cer lumen-heal.sh; do
-    [ -f "$HERE/$f" ] || die "missing $f next to this script (use the bundle from tools/dist.sh)"
+
+# Firmware variables must be readable and writable.
+if ! grep -q " $EFIVARS efivarfs" /proc/mounts; then
+    mount -t efivarfs efivarfs "$EFIVARS" 2>/dev/null || die "couldn't mount efivarfs"
+fi
+if grep " $EFIVARS efivarfs" /proc/mounts | grep -q '[ ,]ro[ ,]'; then
+    mount -o remount,rw "$EFIVARS" || die "firmware variables are read-only and couldn't be remounted"
+fi
+
+if ! command -v efibootmgr >/dev/null; then
+    say "installing efibootmgr…"
+    # Retry after refreshing package lists: fresh installs often have none.
+    if command -v apt-get >/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y efibootmgr >/dev/null 2>&1 ||
+            { apt-get update >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y efibootmgr >/dev/null 2>&1; } || true
+    elif command -v dnf >/dev/null; then dnf install -y efibootmgr >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null; then
+        pacman -S --noconfirm --needed efibootmgr >/dev/null 2>&1 || pacman -Sy --noconfirm --needed efibootmgr >/dev/null 2>&1 || true
+    elif command -v zypper >/dev/null; then zypper --non-interactive install efibootmgr >/dev/null 2>&1 || true
+    elif command -v xbps-install >/dev/null; then xbps-install -y efibootmgr >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null; then apk add efibootmgr >/dev/null 2>&1 || { apk update >/dev/null 2>&1; apk add efibootmgr >/dev/null 2>&1; } || true
+    fi
+    command -v efibootmgr >/dev/null || die "efibootmgr is needed; please install it with your package manager and run this again"
+fi
+
+for f in lumen.efi "shim$S.efi" "mm$S.efi" lumen.cer lumen-heal.sh mok-request.sh; do
+    [ -f "$HERE/$f" ] || die "the installer is incomplete ($f is missing); please download it again"
 done
 
-ESP=""
-if command -v bootctl >/dev/null; then ESP=$(bootctl --print-esp-path 2>/dev/null || true); fi
-if [ -z "$ESP" ]; then
-    for d in /boot/efi /efi /boot; do
-        if [ "$(findmnt -n -o FSTYPE "$d" 2>/dev/null)" = vfat ]; then ESP=$d; break; fi
+ESP_MOUNTED_BY_US=""
+find_esp() {
+    if command -v bootctl >/dev/null; then
+        p=$(bootctl --print-esp-path 2>/dev/null || true)
+        if [ -n "$p" ]; then echo "$p"; return; fi
+    fi
+    for d in /boot/efi /efi /boot /boot/EFI; do
+        if [ "$(findmnt -n -o FSTYPE "$d" 2>/dev/null)" = vfat ] && [ -d "$d/EFI" ]; then echo "$d"; return; fi
     done
-fi
-[ -n "$ESP" ] || die "couldn't find a mounted EFI system partition"
-
+    # Not mounted: find the partition by its GPT type and mount it ourselves.
+    dev=$(lsblk -rno PATH,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+    if [ -n "$dev" ]; then
+        mkdir -p /run/lumen-esp
+        mount -t vfat "$dev" /run/lumen-esp && ESP_MOUNTED_BY_US=/run/lumen-esp && echo /run/lumen-esp && return
+    fi
+    return 1
+}
+ESP=$(find_esp) || die "couldn't find the EFI system partition"
+[ -w "$ESP" ] || die "the EFI system partition ($ESP) is read-only"
 D="$ESP/EFI/lumen"
+
+lumen_entry() {
+    efibootmgr | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Lumen\([[:space:]].*\)\{0,1\}$/\1/p' | head -n1
+}
+healthy() { [ -e "$EFIVARS/LumenHealthy-$VENDOR_GUID" ]; }
+sb_on() { od -An -t u1 "$EFIVARS/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c" 2>/dev/null | awk 'NF { v = $NF } END { exit !(v == 1) }'; }
+hexof() { od -An -tx1 -v "$1" | tr -d ' \n'; }
+key_enrolled() {
+    f="$EFIVARS/MokListRT-$SHIM_GUID"
+    [ -e "$f" ] && hexof "$f" | grep -q "$(hexof "$HERE/lumen.cer")"
+}
+
+# ---- uninstall -------------------------------------------------------------------
+
+if [ "$MODE" = uninstall ]; then
+    num=$(lumen_entry)
+    if [ -n "$num" ]; then
+        efibootmgr --quiet --delete-bootnum --bootnum "$num" || true
+        say "removed firmware boot entry Boot$num"
+    fi
+    if command -v systemctl >/dev/null; then
+        systemctl disable --now lumen-heal.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/lumen-heal.service
+        systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/sbin/lumen-heal
+    rm -rf "$D"
+    for v in LumenHealthy LumenLastBoot; do
+        chattr -i "$EFIVARS/$v-$VENDOR_GUID" 2>/dev/null || true
+        rm -f "$EFIVARS/$v-$VENDOR_GUID"
+    done
+    # Withdraw a Secure Boot approval request for our key that was never confirmed.
+    if [ -e "$EFIVARS/MokNew-$SHIM_GUID" ] && [ -f "$HERE/lumen.cer" ] && hexof "$EFIVARS/MokNew-$SHIM_GUID" | grep -q "$(hexof "$HERE/lumen.cer")"; then
+        for v in MokNew MokAuth; do
+            chattr -i "$EFIVARS/$v-$SHIM_GUID" 2>/dev/null || true
+            rm -f "$EFIVARS/$v-$SHIM_GUID"
+        done
+    fi
+    result "ok=1"
+    say "Lumen has been removed. Your PC will start the way it did before."
+    exit 0
+fi
+
+# ---- install -------------------------------------------------------------------
+
+ESP_FREE_KB=$(df -Pk "$ESP" | awk 'NR == 2 { print $4 }')
+NEED_KB=$(( ($(du -sk "$HERE" | cut -f1)) + 512 ))
+[ "${ESP_FREE_KB:-0}" -ge "$NEED_KB" ] || [ -d "$D" ] || die "the EFI system partition is full (${ESP_FREE_KB} KB free, ${NEED_KB} KB needed)"
+
+UPDATE=0
+[ -d "$D" ] && UPDATE=1
+if [ "$YES" -ne 1 ]; then
+    if [ $UPDATE -eq 1 ]; then printf 'Update Lumen on %s? [Y/n] ' "$ESP"; else printf 'Install Lumen on %s? Your current boot setup is kept. [Y/n] ' "$ESP"; fi
+    read -r answer </dev/tty || answer=y
+    case $answer in [nN]*) exit 0 ;; esac
+fi
+
+# Undo everything on failure.
+CREATED_DIR=""
+CREATED_ENTRY=""
+DONE=0
+rollback() {
+    [ $DONE -eq 1 ] && return
+    say "something went wrong; undoing changes…"
+    [ -n "$CREATED_ENTRY" ] && efibootmgr --quiet --delete-bootnum --bootnum "$CREATED_ENTRY" 2>/dev/null || true
+    [ -n "$CREATED_DIR" ] && rm -rf "$CREATED_DIR"
+}
+cleanup() {
+    rollback
+    if [ -n "$ESP_MOUNTED_BY_US" ]; then umount "$ESP_MOUNTED_BY_US" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
+[ $UPDATE -eq 1 ] || CREATED_DIR=$D
 mkdir -p "$D"
-cp "$HERE/shim$S.efi" "$HERE/mm$S.efi" "$HERE/lumen.cer" "$D/"
-cp "$HERE/lumen.efi" "$D/grub$S.efi"   # shim starts grub<arch>.efi from its own folder
+put() { # src dst: copy via a temp name so a crash never leaves a half-written loader
+    cp "$1" "$2.new" && sync && mv -f "$2.new" "$2" && cmp -s "$1" "$2" || die "couldn't write $2"
+}
+put "$HERE/shim$S.efi" "$D/shim$S.efi"
+put "$HERE/mm$S.efi" "$D/mm$S.efi"
+put "$HERE/lumen.cer" "$D/lumen.cer"
+put "$HERE/lumen.efi" "$D/grub$S.efi" # shim starts grub<arch>.efi from its own folder
 if [ ! -f "$D/lumen.conf" ]; then
     cp "$HERE/lumen.conf" "$D/lumen.conf" 2>/dev/null || printf 'timeout 5\ndefault last\n' > "$D/lumen.conf"
-    # BitLocker measures the boot chain; hand Windows to the firmware's own
+    # BitLocker measures the boot chain; hand Windows to its own firmware
     # entry so it never asks for the recovery key.
     if command -v blkid >/dev/null && blkid -t TYPE=BitLocker >/dev/null 2>&1; then
         printf '\n# Added by installer: BitLocker detected\nbootnext Windows\n' >> "$D/lumen.conf"
-        echo "BitLocker detected: Windows will be started via its own firmware entry."
+        result "bitlocker=1"
     fi
 fi
-echo "Installed to $D"
+sync
+say "copied Lumen to $D"
+
+num=$(lumen_entry)
+order=$(efibootmgr | sed -n 's/^BootOrder: //p')
+if [ -z "$num" ]; then
+    src=$(findmnt -n -o SOURCE "$ESP")
+    disk=/dev/$(lsblk -no PKNAME "$src" | head -n1)
+    part=$(cat "/sys/class/block/$(basename "$src")/partition")
+    efibootmgr --quiet --create --disk "$disk" --part "$part" --label Lumen --loader "\\EFI\\lumen\\shim$S.efi" ||
+        die "the firmware refused to add a boot entry"
+    num=$(lumen_entry)
+    [ -n "$num" ] || die "the firmware didn't keep the new boot entry"
+    CREATED_ENTRY=$num
+    say "added firmware boot entry Boot$num"
+fi
+if healthy; then
+    # Lumen already ran fine on this PC: keep it the default.
+    rest=$(echo "$order" | tr ',' '\n' | grep -vix "$num" | grep . | paste -sd, - || true)
+    efibootmgr --quiet --bootorder "$num${rest:+,$rest}"
+else
+    # Not proven yet: leave the default alone, just try Lumen next boot.
+    if [ -n "$order" ]; then
+        rest=$(echo "$order" | tr ',' '\n' | grep -vix "$num" | grep . | paste -sd, - || true)
+        efibootmgr --quiet --bootorder "${rest:+$rest,}$num"
+    fi
+    efibootmgr --quiet --bootnext "$num" || die "couldn't schedule Lumen for the next boot"
+fi
 
 install -m 0755 "$HERE/lumen-heal.sh" /usr/local/sbin/lumen-heal
-if command -v systemctl >/dev/null; then
+if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
     cat > /etc/systemd/system/lumen-heal.service <<'UNIT'
 [Unit]
 Description=Keep Lumen first in the firmware boot order
@@ -65,28 +245,32 @@ ExecStop=/usr/local/sbin/lumen-heal
 WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
-    systemctl enable --now lumen-heal.service >/dev/null 2>&1 || true
+    systemctl enable lumen-heal.service >/dev/null 2>&1 || true
 fi
-/usr/local/sbin/lumen-heal || true
 
-sb_on() { od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>/dev/null | awk '{exit !($NF==1)}'; }
 if sb_on; then
-    if command -v mokutil >/dev/null && mokutil --test-key "$HERE/lumen.cer" 2>/dev/null | grep -q "already enrolled"; then
-        echo "Secure Boot: Lumen's key is already enrolled."
+    if key_enrolled; then
+        result "mok=enrolled"
     else
-        echo
-        echo "Secure Boot is on. Choose a one-time password; you'll type it once on the"
-        echo "next boot to approve Lumen's key."
-        if command -v mokutil >/dev/null; then
-            mokutil --import "$HERE/lumen.cer"
-        else
-            "$HERE/mok-request.sh" "$HERE/lumen.cer"
-        fi
-        cat <<'MSG'
-
-On the next boot a blue "Shim UEFI key management" screen appears:
-  press a key -> Enroll MOK -> Continue -> Yes -> type the password -> Reboot
-MSG
+        if [ -z "$CODE" ]; then CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }'); fi
+        LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" "$HERE/lumen.cer" >/dev/null || die "couldn't queue the Secure Boot key"
+        result "mok=queued"
+        result "code=$CODE"
     fi
+else
+    result "mok=off"
 fi
-echo "Done. Lumen will appear on the next boot."
+
+DONE=1
+result "ok=1"
+result "update=$UPDATE"
+say "done."
+if [ "$YES" -ne 1 ] && sb_on && ! key_enrolled; then
+    cat <<MSG
+
+Restart your PC. A blue "Shim UEFI key management" screen will appear once:
+  press any key -> Enroll MOK -> Continue -> Yes -> type $CODE -> Reboot
+MSG
+else
+    [ "$YES" -eq 1 ] || echo "Restart your PC to see Lumen."
+fi

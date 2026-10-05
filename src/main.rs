@@ -239,7 +239,6 @@ fn main() -> Status {
     clock::init();
     let _ = system::with_stdout(|o| o.enable_cursor(false));
 
-    launch::heal_boot_order();
     let me = SelfImage::get();
     let cfg = load_config(&me);
     let Some(mut display) = Display::new(&cfg.resolution) else {
@@ -253,6 +252,10 @@ fn main() -> Status {
     };
     display.canvas.px.copy_from_slice(&display.backdrop);
     display.fade_in(0.25);
+    // We can draw on this machine: record that, and only then claim (or
+    // reclaim) first place in the firmware boot order.
+    launch::mark_healthy();
+    launch::heal_boot_order();
 
     discover::connect_all();
     let entries = discover::scan(&me, &cfg);

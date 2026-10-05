@@ -8,9 +8,13 @@ G=605dab50-e046-4300-abb6-3dd810dd8b23
 V=${EFIVARS:-/sys/firmware/efi/efivars}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
-if [ -t 0 ]; then stty -echo; fi
-printf 'Password: '; read -r pw; printf '\nAgain: '; read -r pw2
-if [ -t 0 ]; then stty echo; fi; echo
+if [ -n "${LUMEN_MOK_PASSWORD:-}" ]; then
+    pw=$LUMEN_MOK_PASSWORD; pw2=$pw
+else
+    if [ -t 0 ]; then stty -echo; fi
+    printf 'Password: '; read -r pw; printf '\nAgain: '; read -r pw2
+    if [ -t 0 ]; then stty echo; fi; echo
+fi
 [ -n "$pw" ] && [ "$pw" = "$pw2" ] || { echo "passwords don't match" >&2; exit 1; }
 
 le32() { printf "\\$(printf %03o $(($1 & 255)))\\$(printf %03o $(($1 >> 8 & 255)))\\$(printf %03o $(($1 >> 16 & 255)))\\$(printf %03o $(($1 >> 24 & 255)))"; }

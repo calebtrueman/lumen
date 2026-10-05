@@ -1,0 +1,17 @@
+[package]
+name = "lumen-installer"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+# One-click Windows installer: embeds dist/x86_64, dist/aarch64,
+# install/lumen-windows.ps1 and assets/lumen.ico. Build with
+# tools/make-installers.sh (needs `brew install mingw-w64` on macOS).
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+
+[workspace]

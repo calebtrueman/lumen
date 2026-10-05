@@ -56,6 +56,23 @@ pub fn remember(entry: &Entry) {
     );
 }
 
+/// Records that Lumen started and drew its menu on this machine. The
+/// installers only make Lumen the default boot entry (and the heal tasks
+/// only keep it there) once this exists, so a Lumen that can't run here
+/// never gets in the way. Written only when missing to spare NVRAM.
+pub fn mark_healthy() {
+    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    let current = runtime::get_variable_boxed(cstr16!("LumenHealthy"), &VENDOR).ok();
+    if current.as_ref().map(|(d, _)| &d[..]) != Some(version) {
+        let _ = runtime::set_variable(
+            cstr16!("LumenHealthy"),
+            &VENDOR,
+            VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
+            version,
+        );
+    }
+}
+
 pub fn last_choice() -> Option<String> {
     let (data, _) = runtime::get_variable_boxed(cstr16!("LumenLastBoot"), &VENDOR).ok()?;
     String::from_utf8(data.into_vec()).ok()
