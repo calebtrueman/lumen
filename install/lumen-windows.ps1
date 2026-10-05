@@ -59,7 +59,9 @@ $IconFile = @((Join-Path $BundleRoot 'lumen.ico'), (Join-Path $Data 'lumen.ico')
 New-Item -ItemType Directory -Force $Data | Out-Null
 function Write-Log([string]$msg) {
     Add-Content -Path $LogFile -Value "$(Get-Date -Format s)  $msg" -ErrorAction SilentlyContinue
-    if (-not $Gui) { Write-Output $msg }
+    # Write-Host, not Write-Output: pipeline output would become part of the
+    # calling function's return value (e.g. a boot entry number).
+    if (-not $Gui) { Write-Host $msg }
 }
 
 Add-Type -TypeDefinition @'
@@ -420,7 +422,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
         } else {
         $num = Find-LumenEntry
         if ($null -eq $num) {
-            $num = New-LumenEntry
+            $num = [uint16]@(New-LumenEntry)[-1]
             $created.Entry = $num
         }
         $rest = @($created.Order | Where-Object { $_ -ne $num })
@@ -453,7 +455,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
     } catch {
         Write-Log "Install failed: $($_.Exception.Message). Rolling back."
         try {
-            if ($null -ne $created.Entry) { Remove-LumenEntry $created.Entry }
+            if ($null -ne $created.Entry) { Remove-LumenEntry ([uint16]@($created.Entry)[-1]) }
             if ($created.BcdId) { bcdedit /delete $created.BcdId | Out-Null }
             if ($created.Order.Count -gt 0) { Set-BootOrder $created.Order }
             if ($created.Dir) { Use-Esp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue } }
@@ -783,7 +785,7 @@ if (-not $Yes) {
 }
 $code = if ($Code) { $Code } else { New-ApprovalCode }
 try {
-    Invoke-Install $state $code { param($m) Write-Output $m }
+    Invoke-Install $state $code { param($m) Write-Host $m }
 } catch {
     $report = try { Save-DiagnosticReport } catch { $null }
     if ($report) { Write-Output "Install failed; diagnostics saved to $report" }
