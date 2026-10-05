@@ -313,3 +313,9 @@ builds.
 | `installer/windows/` | one-click `.exe` launcher (embeds the bundles) |
 | `.github/workflows/ci.yml` | builds everything; real install/heal/uninstall on a Windows runner |
 | `tools/` | dist/sign/fetch scripts, VM harness, icon gallery, tests |
+
+## License
+
+Lumen is MIT-licensed (see [`LICENSE`](LICENSE)). Bundled fonts, logos and the
+Microsoft-signed shim keep their own licenses; see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

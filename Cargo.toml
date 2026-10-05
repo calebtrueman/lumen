@@ -2,6 +2,7 @@
 name = "lumen"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }

@@ -2,6 +2,7 @@
 name = "lumen-gallery"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 # Renders every OS icon with Lumen's own renderer, on the host, for review:
