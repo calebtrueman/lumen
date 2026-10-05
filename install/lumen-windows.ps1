@@ -32,7 +32,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.2.0'
+$Version = '0.2.1'
 $Data = Join-Path $env:ProgramData 'Lumen'
 $LogFile = Join-Path $Data 'install.log'
 $TaskName = 'Lumen boot order'
@@ -526,6 +526,87 @@ function Invoke-Uninstall {
     Start-Process -WindowStyle Hidden cmd.exe "/c timeout /t 3 >nul & rmdir /s /q `"$Data`""
 }
 
+# ---- diagnostics -----------------------------------------------------------------
+
+# Everything needed to understand a failed install, without changing anything
+# except one harmless test variable that is deleted straight away.
+function Get-DiagnosticReport {
+    $lines = New-Object Collections.Generic.List[string]
+    function Add([string]$label, [scriptblock]$body) {
+        try { $value = (& $body | Out-String).TrimEnd() } catch { $value = "(failed: $($_.Exception.Message))" }
+        $lines.Add("== $label")
+        $lines.Add($value)
+        $lines.Add('')
+    }
+    $lines.Add("Lumen $Version diagnostics, $(Get-Date -Format s)")
+    $lines.Add('')
+    Add 'Windows' {
+        $os = Get-CimInstance Win32_OperatingSystem
+        "$($os.Caption) $($os.Version) build $($os.BuildNumber), $($os.OSArchitecture); OS arch seen: $OsArch"
+    }
+    Add 'PC' {
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $bios = Get-CimInstance Win32_BIOS
+        $board = Get-CimInstance Win32_BaseBoard
+        "Maker: $($cs.Manufacturer)  Model: $($cs.Model)"
+        "Board: $($board.Manufacturer) $($board.Product)"
+        "Firmware: $($bios.Manufacturer) $($bios.SMBIOSBIOSVersion) ($($bios.ReleaseDate))"
+        "Virtual machine: $(if ($cs.HypervisorPresent -and $cs.Model -match 'Virtual|VMware|KVM|QEMU') { 'likely' } else { 'no' })"
+    }
+    Add 'Firmware mode and security' {
+        "Firmware type: $env:firmware_type"
+        "Secure Boot: $(Test-SecureBoot)"
+        try { "BitLocker on $($env:SystemDrive): $((Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop).ProtectionStatus)" } catch { "BitLocker: unknown ($($_.Exception.Message))" }
+        try {
+            $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop
+            "Virtualization-based security: $(@('off','configured','running')[[int]$dg.VirtualizationBasedSecurityStatus])"
+            "Security services running: $(($dg.SecurityServicesRunning | ForEach-Object { @{1='Credential Guard';2='Memory integrity (HVCI)';3='System Guard';4='SMM firmware measurement';5='Kernel-mode stack protection';7='Hypervisor-enforced paging translation'}[[int]$_] }) -join ', ')"
+        } catch { "Device Guard: unknown" }
+    }
+    Add 'Firmware variable access' {
+        $priv = [LumenFw]::EnablePrivilege()
+        "Privilege SeSystemEnvironmentPrivilege: $(if ($priv -eq 0) { 'enabled' } else { "not held (error $priv)" })"
+        $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
+        "BootOrder: $(if ($order) { (@(Get-BootOrder) | ForEach-Object { '{0:X4}' -f $_ }) -join ',' } else { 'read failed, error ' + [LumenFw]::LastGetError })"
+        foreach ($v in 'BootCurrent', 'BootNext', 'Timeout', 'SecureBoot', 'OsIndicationsSupported') {
+            $d = [LumenFw]::Get($v, [LumenFw]::GlobalGuid)
+            "${v}: $(if ($d) { ($d | ForEach-Object { '{0:x2}' -f $_ }) -join ' ' } else { 'error ' + [LumenFw]::LastGetError })"
+        }
+        foreach ($n in (@(Get-BootOrder) + (0..15)) | Select-Object -Unique) {
+            $d = Get-BootDescription $n
+            'Boot{0:X4}: {1}' -f $n, $(if ($d) { $d } else { "(no entry, error $([LumenFw]::LastGetError))" })
+        }
+        # Harmless write test with Lumen's own variable, deleted immediately.
+        try {
+            [LumenFw]::Set('LumenDiagTest', $LumenGuid, [byte[]](1, 2, 3), [LumenFw]::NvBsRt)
+            $back = [LumenFw]::Get('LumenDiagTest', $LumenGuid)
+            [LumenFw]::Set('LumenDiagTest', $LumenGuid, $null, [LumenFw]::NvBsRt)
+            "Write test (own variable): $(if ($back) { 'OK' } else { 'written but not readable, error ' + [LumenFw]::LastGetError })"
+        } catch { "Write test (own variable): FAILED: $($_.Exception.Message)" }
+        "Lumen boot entry: $(if ($null -ne ($n = Find-LumenEntry)) { 'Boot{0:X4}' -f $n } else { 'none' })   LumenHealthy: $(Test-Healthy)"
+    }
+    Add 'bcdedit /enum firmware' { bcdedit /enum firmware 2>&1 }
+    Add 'EFI system partition' {
+        Get-EspPartition | Select-Object DiskNumber, PartitionNumber, @{n='SizeMB';e={[int]($_.Size / 1MB)}}, Guid | Format-List | Out-String
+        Use-Esp { param($esp)
+            "Free: $([int]((Get-PSDrive $esp.Substring(0, 1)).Free / 1KB)) KB"
+            Get-ChildItem "$esp\EFI" -Directory | ForEach-Object { "\EFI\$($_.Name)" }
+        }
+    }
+    Add 'Scheduled task' { (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Select-Object TaskName, State | Out-String) + "(none means not installed)" }
+    Add 'install.log' { if (Test-Path $LogFile) { Get-Content $LogFile -Tail 200 } else { '(none)' } }
+    $lines -join "`r`n"
+}
+
+# Saves the report where people will find it; returns the path.
+function Save-DiagnosticReport {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $dir = if ($desktop -and (Test-Path $desktop)) { $desktop } else { $Data }
+    $path = Join-Path $dir 'Lumen diagnostics.txt'
+    Set-Content -Path $path -Value (Get-DiagnosticReport) -Encoding UTF8
+    $path
+}
+
 # ---- graphical front end ---------------------------------------------------
 
 function New-Window {
@@ -648,9 +729,14 @@ function Start-Gui {
         }
         if ($choice -eq 'primary') { Restart-Computer -Force }
     } catch {
-        Write-Log "Error: $($_.Exception.Message)"
+        $err = $_.Exception.Message
+        Write-Log "Error: $err"
         $w.Form.Hide()
-        [void](Show-Page $w 'Something went wrong' "$($_.Exception.Message)`n`nAny changes were undone, so your PC starts as before. Details are in $LogFile." 'Close' '')
+        $report = try { Save-DiagnosticReport } catch { $null }
+        $where = if ($report) { "A diagnostics report was saved as `"$(Split-Path $report -Leaf)`" on the Desktop. Please send it to whoever gave you Lumen." } else { "Details are in $LogFile." }
+        if ((Show-Page $w 'Something went wrong' "$err`n`nAny changes were undone, so your PC starts as before.`n`n$where" $(if ($report) { 'Open report' } else { 'Close' }) $(if ($report) { 'Close' } else { '' })) -eq 'primary' -and $report) {
+            Start-Process notepad.exe -ArgumentList "`"$report`""
+        }
     } finally {
         $w.Form.Dispose()
     }
@@ -659,21 +745,24 @@ function Start-Gui {
 # ---- entry point -------------------------------------------------------------
 
 if ($Diagnose) {
-    # Support aid: shows what the installer sees, changes nothing.
-    try { "Privilege: $(if ([LumenFw]::EnablePrivilege() -eq 0) { 'enabled' } else { 'not held by this account' })" } catch { "Privilege: $($_.Exception.Message)" }
-    "Firmware type: $env:firmware_type   OS arch: $OsArch   Secure Boot: $(Test-SecureBoot)"
-    $order = [LumenFw]::Get('BootOrder', [LumenFw]::GlobalGuid)
-    "BootOrder read: $(if ($order) { ($order.Length / 2).ToString() + ' entries' } else { 'failed, error ' + [LumenFw]::LastGetError })"
-    foreach ($v in 'BootCurrent', 'Timeout', 'SecureBoot', 'OsIndicationsSupported', 'PlatformLang') {
-        $d = [LumenFw]::Get($v, [LumenFw]::GlobalGuid)
-        "${v}: $(if ($d) { "$($d.Length) bytes" } else { "error $([LumenFw]::LastGetError)" })"
+    # Support aid: reports what the installer sees; changes nothing.
+    if ($Gui) {
+        $w = New-Window
+        try {
+            $p = Show-Busy $w 'Checking this PC'
+            & $p 'Collecting boot and firmware details…'
+            $report = Save-DiagnosticReport
+            $w.Form.Hide()
+            if ((Show-Page $w 'Diagnostics saved' "The report was saved as `"$(Split-Path $report -Leaf)`" on the Desktop. Nothing on this PC was changed.`n`nPlease send it to whoever gave you Lumen." 'Open report' 'Close') -eq 'primary') {
+                Start-Process notepad.exe -ArgumentList "`"$report`""
+            }
+        } catch {
+            $w.Form.Hide()
+            [void](Show-Page $w 'Diagnostics failed' $_.Exception.Message 'Close' '')
+        } finally { $w.Form.Dispose() }
+    } else {
+        Get-DiagnosticReport
     }
-    foreach ($n in @(Get-BootOrder) + @(0, 1, 2, 3, 0x80)) {
-        $d = Get-BootDescription $n
-        'Boot{0:X4}: {1}' -f $n, $(if ($d) { $d } else { "(none, error $([LumenFw]::LastGetError))" })
-    }
-    "Lumen entry: $(Find-LumenEntry)   healthy: $(Test-Healthy)"
-    try { "ESP: $((Get-EspPartition | Select-Object DiskNumber, PartitionNumber, Size, Guid | Out-String).Trim())" } catch { "ESP: $($_.Exception.Message)" }
     return
 }
 if ($Heal) {
@@ -691,7 +780,13 @@ if (-not $Yes) {
     if ((Read-Host "$verb Lumen? Your current boot setup is kept. [Y/n]") -match '^[nN]') { return }
 }
 $code = if ($Code) { $Code } else { New-ApprovalCode }
-Invoke-Install $state $code { param($m) Write-Output $m }
+try {
+    Invoke-Install $state $code { param($m) Write-Output $m }
+} catch {
+    $report = try { Save-DiagnosticReport } catch { $null }
+    if ($report) { Write-Output "Install failed; diagnostics saved to $report" }
+    throw
+}
 if ($state.NeedsKey) {
     Write-Output ''
     Write-Output "Restart. On the blue `"Shim UEFI key management`" screen: press a key -> Enroll MOK -> Continue -> Yes -> type $code -> Reboot"

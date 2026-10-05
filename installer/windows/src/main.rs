@@ -41,12 +41,14 @@ fn main() {
     args.push(dir.join("lumen-windows.ps1").display().to_string());
     args.push("-Bundle".into());
     args.push(dir.display().to_string());
-    // `/quiet` installs silently (for scripted deployment), `/uninstall` removes.
+    // `/quiet` installs silently (for scripted deployment), `/uninstall`
+    // removes, `/diagnose` saves a report to the Desktop and changes nothing.
     let mut quiet = false;
     for a in env::args().skip(1) {
         match a.to_ascii_lowercase().trim_start_matches(['/', '-']) {
             "quiet" | "silent" | "s" | "q" => quiet = true,
             "uninstall" | "remove" => args.push("-Uninstall".into()),
+            "diagnose" | "diag" => args.push("-Diagnose".into()),
             _ => {}
         }
     }

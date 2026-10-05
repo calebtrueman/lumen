@@ -2,8 +2,8 @@
 1 ICON "../../assets/lumen.ico"
 1 24 "app.manifest"
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,2,0,0
-PRODUCTVERSION 0,2,0,0
+FILEVERSION 0,2,1,0
+PRODUCTVERSION 0,2,1,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -11,9 +11,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Lumen"
       VALUE "FileDescription", "Lumen boot manager installer"
-      VALUE "FileVersion", "0.2.0"
+      VALUE "FileVersion", "0.2.1"
       VALUE "ProductName", "Lumen"
-      VALUE "ProductVersion", "0.2.0"
+      VALUE "ProductVersion", "0.2.1"
       VALUE "OriginalFilename", "Lumen-Installer-Windows.exe"
     END
   END
