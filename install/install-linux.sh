@@ -123,17 +123,20 @@ key_enrolled() {
 # ---- uninstall -------------------------------------------------------------------
 
 if [ "$MODE" = uninstall ]; then
-    num=$(lumen_entry)
-    if [ -n "$num" ]; then
-        efibootmgr --quiet --delete-bootnum --bootnum "$num" || true
-        say "removed firmware boot entry Boot$num"
-    fi
+    # Stop the heal service first: its shutdown hook would otherwise
+    # recreate the entry we're about to delete.
     if command -v systemctl >/dev/null; then
         systemctl disable --now lumen-heal.service >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/lumen-heal.service
         systemctl daemon-reload || true
     fi
     rm -f /usr/local/sbin/lumen-heal
+    num=$(lumen_entry)
+    if [ -n "$num" ]; then
+        if [ "$(efibootmgr | sed -n 's/^BootNext: //p')" = "$num" ]; then efibootmgr --quiet --delete-bootnext || true; fi
+        efibootmgr --quiet --delete-bootnum --bootnum "$num" || true
+        say "removed firmware boot entry Boot$num"
+    fi
     rm -rf "$D"
     for v in LumenHealthy LumenLastBoot; do
         chattr -i "$EFIVARS/$v-$VENDOR_GUID" 2>/dev/null || true
@@ -146,6 +149,7 @@ if [ "$MODE" = uninstall ]; then
             rm -f "$EFIVARS/$v-$SHIM_GUID"
         done
     fi
+    [ -z "$(lumen_entry)" ] || die "the firmware didn't remove the Lumen boot entry"
     result "ok=1"
     say "Lumen has been removed. Your PC will start the way it did before."
     exit 0

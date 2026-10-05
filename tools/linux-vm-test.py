@@ -131,7 +131,7 @@ def main():
                 for marker, name in shots.items():
                     if marker in l:
                         # Lumen shows its menu for 5 s before starting Debian.
-                        for delay in (12, 4, 4):
+                        for delay in (5, 3, 3, 3, 3):
                             time.sleep(delay)
                             shot(f"{name}_{delay}")
             seen = len(lines)

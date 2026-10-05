@@ -96,18 +96,24 @@ public static class LumenFw {
         if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
     }
 
+    /// Last error from Get (203 = variable not found).
+    public static int LastGetError;
+
     public static byte[] Get(string name, string guid) {
         byte[] buf = new byte[65536];
         uint attr;
         uint n = GetFirmwareEnvironmentVariableExW(name, guid, buf, (uint)buf.Length, out attr);
-        if (n == 0) return null;
+        if (n == 0) { LastGetError = Marshal.GetLastWin32Error(); return null; }
+        LastGetError = 0;
         Array.Resize(ref buf, (int)n);
         return buf;
     }
 
     public static void Set(string name, string guid, byte[] data, uint attr) {
-        if (!SetFirmwareEnvironmentVariableExW(name, guid, data, (uint)(data == null ? 0 : data.Length), attr))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "The firmware refused to save " + name);
+        if (!SetFirmwareEnvironmentVariableExW(name, guid, data, (uint)(data == null ? 0 : data.Length), attr)) {
+            int code = Marshal.GetLastWin32Error();
+            throw new Win32Exception(code, "The firmware refused to save " + name + ": " + new Win32Exception(code).Message + " (error " + code + ")");
+        }
     }
 
     public static int IndexOf(byte[] hay, byte[] needle) {
@@ -182,13 +188,37 @@ function New-LoadOption($part, [string]$file, [string]$desc) {
     [byte[]]([BitConverter]::GetBytes([uint32]1) + [BitConverter]::GetBytes([uint16]$path.Length) + $d + $path)
 }
 
+function Test-BootSlotFree([uint16]$n) {
+    # Only "not found" (203) means free; any other read error means unknown.
+    $null -eq [LumenFw]::Get(('Boot{0:X4}' -f $n), [LumenFw]::GlobalGuid) -and [LumenFw]::LastGetError -eq 203
+}
+
 function New-LumenEntry {
     $part = Get-EspPartition
     if (-not $part) { throw "Couldn't find the EFI system partition." }
-    $num = [uint16](0..0x0FFF | Where-Object { -not [LumenFw]::Get(('Boot{0:X4}' -f $_), [LumenFw]::GlobalGuid) } | Select-Object -First 1)
-    [LumenFw]::Set(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid, (New-LoadOption $part $Loader $Label), [LumenFw]::NvBsRt)
-    if ((Get-BootDescription $num) -ne $Label) { throw "The firmware didn't keep the new boot entry." }
-    $num
+    $used = @(Get-BootOrder)
+    $num = 0..0xFF | Where-Object { $used -notcontains $_ -and (Test-BootSlotFree $_) } | Select-Object -First 1
+    if ($null -eq $num) { throw 'No free firmware boot entry slot.' }
+    $num = [uint16]$num
+    try {
+        [LumenFw]::Set(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid, (New-LoadOption $part $Loader $Label), [LumenFw]::NvBsRt)
+        if ((Get-BootDescription $num) -ne $Label) { throw "The firmware didn't keep the new boot entry." }
+        Write-Log "Created boot entry Boot$('{0:X4}' -f $num) directly."
+        return $num
+    } catch {
+        Write-Log "Direct boot entry write failed ($($_.Exception.Message)); trying bcdedit."
+    }
+    # Fallback: let Windows' boot configuration service create it. Only the
+    # GUID in bcdedit's output is used, which isn't localised.
+    $out = bcdedit /copy '{bootmgr}' /d $Label 2>&1 | Out-String
+    $id = [regex]::Match($out, '\{[0-9a-fA-F-]{36}\}').Value
+    if (-not $id) { throw "Windows couldn't create a boot entry either: $out" }
+    $set = bcdedit /set $id path $Loader 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { bcdedit /delete $id | Out-Null; throw "Windows couldn't point the boot entry at Lumen: $set" }
+    $found = Find-LumenEntry
+    if ($null -eq $found) { bcdedit /delete $id | Out-Null; throw "The firmware didn't keep the new boot entry." }
+    Write-Log "Created boot entry Boot$('{0:X4}' -f $found) via bcdedit."
+    $found
 }
 
 function Remove-LumenEntry([uint16]$num) {
@@ -319,7 +349,6 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
         if ($null -eq $num) {
             $num = New-LumenEntry
             $created.Entry = $num
-            Write-Log "Created boot entry Boot$('{0:X4}' -f $num)."
         }
         $rest = @($created.Order | Where-Object { $_ -ne $num })
         if (Test-Healthy) {

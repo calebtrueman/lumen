@@ -47,10 +47,11 @@ jobs:
           "Firmware: $env:firmware_type"
           if ($env:firmware_type -ne 'UEFI') { "::warning::This runner boots in BIOS mode; can't exercise firmware boot entries."; exit 0 }
           try { "Secure Boot: $(Confirm-SecureBootUEFI)" } catch { "Secure Boot: unsupported" }
-          $before = bcdedit /enum firmware | Out-String
+          "--- firmware boot entries before install ---"
+          bcdedit /enum firmware
 
           $p = Start-Process .\Lumen-Installer-Windows.exe -ArgumentList '/quiet' -Wait -PassThru
-          Get-Content "$env:ProgramData\Lumen\install.log"
+          Get-Content "$env:ProgramData\Lumen\install.log" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
 
           function Check($ok, $what) { if ($ok) { "PASS $what" } else { throw "FAIL $what" } }

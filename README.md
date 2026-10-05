@@ -142,31 +142,65 @@ None of these ever remove other entries.
 
 ## Install
 
-Build a signed bundle, then run the installer for whichever OS you're in
-(once is enough):
+Download and run the installer for the OS you're using right now. You only
+need to do this once, from any one of your systems.
+
+| | |
+| --- | --- |
+| **Windows** | Double-click **`Lumen-Installer-Windows.exe`** and approve the administrator prompt. Works on x64 and ARM64 PCs. |
+| **Linux** | Double-click **`Lumen-Installer-Linux.run`**, or run `sh Lumen-Installer-Linux.run` in a terminal. Works on x86_64 and aarch64. |
+
+The installer shows what will happen, does it, and tells you the one thing
+you might need to do yourself. If Secure Boot is on, that's typing a 4-digit
+code on a blue approval screen at the next restart. The code is digits only,
+because that screen uses a US keyboard layout.
+
+**Why it can't break booting:**
+
+- **Lumen is added next to your existing boot loaders and doesn't replace
+  them.** Windows Boot Manager and GRUB are never modified.
+- **Lumen is first tried as the *next boot only*.** Your current default stays
+  the default until Lumen has actually started on that PC and drawn its menu.
+  Only then does it make itself the default. If the first start fails for
+  any reason (a skipped Secure Boot approval, odd firmware, a graphics
+  problem), the PC simply keeps starting the way it always has.
+- **The installer checks everything first and undoes everything if any step
+  fails.** That includes UEFI mode, administrator rights, the EFI partition,
+  free space and the processor type. On Linux it also installs `efibootmgr`
+  if needed and mounts the EFI partition if your distro doesn't.
+- **Files are written under a temporary name, then verified.**
+- **Logs:** `%ProgramData%\Lumen\install.log` on Windows; terminal output
+  on Linux.
+
+**Uninstall:**
+
+- **Windows:** Settings → Apps → *Lumen boot manager* → Uninstall.
+- **Linux:** `sh Lumen-Installer-Linux.run --uninstall`.
+
+Either way the PC starts exactly as it did before.
+
+**Silent deployment:** `Lumen-Installer-Windows.exe /quiet` (and
+`/quiet /uninstall`). On Linux, use `sudo ./install-linux.sh --yes` from a
+bundle.
+
+### Building the installers
 
 ```sh
-tools/dist.sh            # dist/x86_64/  (tools/dist.sh aarch64 for ARM PCs)
+brew install mingw-w64 osslsigncode     # macOS; apt install mingw-w64 osslsigncode on Linux
+tools/make-installers.sh                # -> dist/Lumen-Installer-{Windows.exe,Linux.run}, SHA256SUMS
 ```
 
-- **Linux:** `sudo ./install-linux.sh`
-- **Windows** (elevated PowerShell):
-  `powershell -ExecutionPolicy Bypass -File lumen-windows.ps1`
-- **Uninstall from Windows:** `lumen-windows.ps1 -Uninstall`. This removes the
-  entry, the task and `\EFI\lumen`.
-
-The bundle contains:
-
-- `lumen.efi`, signed with `keys/lumen.key`
-- Debian's Microsoft-signed `shim` and `mm` (MokManager), fetched with pinned
-  hashes by `tools/fetch-shim.sh`
-- `lumen.cer`
-- the installers and a sample `lumen.conf`
+This builds both architectures, signs Lumen with `keys/lumen.key`, and embeds
+Debian's Microsoft-signed shim, fetched with pinned hashes.
 
 > **Signing key:** `tools/genkey.sh` creates `keys/lumen.key` on first build.
-> Anything signed with it will boot on machines that enrolled `lumen.cer`, so
-> for real releases keep it offline/in an HSM and never commit it (`/keys` is
-> git-ignored).
+> Anything signed with it boots on machines that approved `lumen.cer`, so for
+> real releases keep it offline/in an HSM and never commit it (`/keys` is
+> git-ignored). CI signs with a throwaway key.
+
+> **Windows SmartScreen:** until the `.exe` is Authenticode-signed with a code
+> signing certificate, Windows shows *"Windows protected your PC"*. Click
+> *More info → Run anyway*.
 
 ## Configuration
 
@@ -203,6 +237,7 @@ cargo build --release --features debugcon --examples --bins && tools/dist.sh
 python3 tools/vm.py                                    # interactive window
 python3 tools/vm.py --headless --wait 30 --shot menu   # -> target/vm/menu.png
 python3 tools/test/check_windows_installer.py pwsh     # Windows installer byte-level checks
+tools/linux-vm-test.py debian-13-genericcloud-arm64.qcow2   # real Debian: install, first boot, heal, uninstall
 ```
 
 Discovery decisions are logged to `target/vm/debug.log` in `debugcon`
@@ -231,5 +266,7 @@ builds.
 | `src/mouse.rs` | relative/absolute pointer input |
 | `src/ui.rs` | layout, animation, hit-testing, input |
 | `src/gfx.rs`, `src/icons.rs`, `src/text.rs` | SDF renderer, icon tiles, TrueType text |
-| `install/` | Linux/Windows installers, heal service, MOK request |
+| `install/` | Linux/Windows installer logic, heal service, MOK request |
+| `installer/windows/` | one-click `.exe` launcher (embeds the bundles) |
+| `.github/workflows/ci.yml` | builds everything; real install/heal/uninstall on a Windows runner |
 | `tools/` | dist/sign/fetch scripts, VM harness, icon gallery, tests |
