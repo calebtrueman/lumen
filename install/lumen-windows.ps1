@@ -262,7 +262,11 @@ function New-LumenEntry {
     # The firmware entry only exists once it's in the firmware boot order.
     bcdedit /set '{fwbootmgr}' displayorder $id /addlast | Out-Null
     $found = Find-LumenEntry
-    if ($null -eq $found) { bcdedit /delete $id | Out-Null; throw "The firmware didn't keep the new boot entry." }
+    if ($null -eq $found) {
+        bcdedit /set '{fwbootmgr}' displayorder $id /remove | Out-Null
+        bcdedit /delete $id | Out-Null
+        throw "This PC's firmware doesn't allow new boot entries to be added (this happens on some virtual machines and centrally managed PCs). Nothing was changed."
+    }
     Write-Log "Created boot entry Boot$('{0:X4}' -f $found) via bcdedit."
     $found
 }

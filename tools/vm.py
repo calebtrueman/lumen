@@ -66,6 +66,17 @@ def stage():
     with open(os.path.join(OUT, "usb_arch", "loader", "entries", "01-archiso-linux.conf"), "w") as f:
         f.write("title    Arch Linux install medium (x86_64, UEFI)\nlinux    /arch/boot/x86_64/vmlinuz-linux\n")
 
+    if "--demo" in sys.argv:
+        # A tidy, realistic machine for README screenshots, at 1080p.
+        put("disk0", "EFI/BOOT/BOOTX64.EFI", lumen)
+        for d in ("ubuntu", "fedora"):
+            put("disk0", f"EFI/{d}/shimx64.efi", fake)
+        put("disk0", "EFI/Linux/arch-linux.efi", fake)
+        with open(os.path.join(OUT, "disk0", "EFI", "BOOT", "lumen.conf"), "w") as f:
+            f.write("timeout 30\nresolution 1920x1080\n")
+        put("disk1", "EFI/Microsoft/Boot/bootmgfw.efi", fake)
+        shutil.copy(os.path.join(SHARE, "edk2-i386-vars.fd"), os.path.join(OUT, "vars.fd"))
+        return
     if SB:
         if MOK == "queued":
             subprocess.check_call([sys.executable, os.path.join(ROOT, "tools", "mok_request.py"),
@@ -147,7 +158,7 @@ def main():
             time.sleep(0.3)
         it = iter(args)
         for a in it:
-            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test"):
+            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test", "--demo"):
                 continue
             if a == "--mouse-test":
                 next(it), next(it)

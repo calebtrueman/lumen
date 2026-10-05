@@ -54,10 +54,24 @@ jobs:
           bcdedit /enum firmware
 
           $p = Start-Process .\Lumen-Installer-Windows.exe -ArgumentList '/quiet' -Wait -PassThru
-          Get-Content "$env:ProgramData\Lumen\install.log" -ErrorAction SilentlyContinue
-          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $log = Get-Content "$env:ProgramData\Lumen\install.log" -Raw -ErrorAction SilentlyContinue
+          $log
 
           function Check($ok, $what) { if ($ok) { "PASS $what" } else { throw "FAIL $what" } }
+          if ($p.ExitCode -ne 0) {
+              # Hosted runners are Azure VMs whose firmware refuses new boot
+              # entries. Then the job is to prove nothing was left behind.
+              if ($log -notmatch "doesn't allow new boot entries") { throw "installer exit code $($p.ExitCode)" }
+              "::warning::This runner's firmware refuses new boot entries; verifying clean rollback instead."
+              mountvol S: /S
+              Check (-not (Test-Path 'S:\EFI\lumen')) 'rollback removed ESP files'
+              mountvol S: /D
+              Check (-not ((bcdedit /enum firmware | Out-String) -match '\s{2,}Lumen\s*(\r?\n|$)')) 'rollback left no boot entry'
+              Check (-not ((bcdedit /enum all | Out-String) -match '\s{2,}Lumen\s*(\r?\n|$)')) 'rollback left no BCD object'
+              Check (-not (Get-ScheduledTask -TaskName 'Lumen boot order' -ErrorAction SilentlyContinue)) 'no heal task registered'
+              Check (-not (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Lumen')) 'no Apps & features entry'
+              exit 0
+          }
           mountvol S: /S
           foreach ($f in 'shimx64.efi', 'mmx64.efi', 'grubx64.efi', 'lumen.cer', 'lumen.conf') { Check (Test-Path "S:\EFI\lumen\$f") "ESP has $f" }
           mountvol S: /D

@@ -1,5 +1,7 @@
 # Lumen
 
+![Lumen's boot menu with Windows, Fedora, Ubuntu and Arch Linux, counting down to start Windows](docs/screenshots/menu.png)
+
 A graphical OS picker for UEFI PCs. It runs before any operating system,
 finds every OS on every drive and USB stick, and starts the one you pick.
 Each OS gets a card with its real logo in its brand colours. Animations are
@@ -40,6 +42,11 @@ inside Linux the way GRUB does. It uses several independent sources:
    So an Ubuntu, Fedora, Debian, Arch, openSUSE or Mint stick shows up by
    name, even with a blank label.
 
+![A Debian live USB plugged in while the menu is open appears as a new card](docs/screenshots/usb.png)
+
+*A Debian live USB plugged in while the menu was open. Its label was blank,
+so Lumen recognised it from the Debian certificate inside its shim.*
+
 Partitions are matched by signature *and* file, so cloned disks and sticks
 flashed from the same ISO are handled correctly.
 
@@ -63,6 +70,8 @@ There are about 85 OS tiles. They use real logos from
 Projects without a logo glyph, such as Haiku and Proxmox, get a brand-coloured
 letter tile.
 
+![All OS icon tiles](docs/screenshots/icons.png)
+
 To preview every tile: `cargo run --release --manifest-path
 tools/gallery/Cargo.toml -- gallery.ppm`.
 
@@ -76,6 +85,10 @@ tools/gallery/Cargo.toml -- gallery.ppm`.
 | Tab, ↓ / ↑ | OS row ↔ Firmware Settings / Restart / Shut Down |
 | Esc / any key / moving the mouse | stop the countdown |
 | F5 | rescan (rarely needed: new USB sticks are detected automatically) |
+
+| Mouse | Power row |
+| --- | --- |
+| ![Hovering a card with the mouse selects it](docs/screenshots/mouse.png) | ![Firmware Settings, Restart and Shut Down](docs/screenshots/power.png) |
 
 Mice and touchpads (relative pointers) and touchscreens/tablets (absolute
 pointers) all work, as long as the firmware has a driver for them, which
@@ -100,6 +113,10 @@ the next boot a blue *Shim UEFI key management* screen appears:
 4. Reboot.
 
 After that, Lumen starts automatically with Secure Boot fully on.
+
+| One-time key approval (shim's MokManager) | A loader Secure Boot refuses |
+| --- | --- |
+| ![The blue Perform MOK management screen with Enroll MOK](docs/screenshots/mok-enroll.png) | ![Error notice: Couldn't start Windows, it was blocked by Secure Boot](docs/screenshots/secure-boot-blocked.png) |
 
 - **Linux** uses `mokutil`, with a built-in fallback if it isn't installed.
 - **Windows** has no `mokutil`, so the installer writes the same enrollment
