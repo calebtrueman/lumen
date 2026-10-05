@@ -1,0 +1,28 @@
+[package]
+name = "lumen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
+libm = "0.2.16"
+log = "0.4.34"
+uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "logger"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 2
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[features]
+# Send log output to the QEMU debug console (I/O port 0xE9). Testing only.
+debugcon = ["uefi/log-debugcon"]
+
+[dev-dependencies]
+log = "0.4.34"
+uefi-raw = "0.17"

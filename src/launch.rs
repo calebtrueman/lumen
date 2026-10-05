@@ -1,0 +1,149 @@
+//! Starting a loader, rebooting into firmware setup, and remembering the
+//! last choice in an NVRAM variable.
+
+use crate::discover::Entry;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use uefi::boot::{self, LoadImageSource};
+use uefi::proto::loaded_image::LoadedImage;
+use uefi::proto::BootPolicy;
+use uefi::runtime::{self, ResetType, VariableAttributes, VariableVendor};
+use uefi::{cstr16, guid, CString16, Status};
+
+const VENDOR: VariableVendor = VariableVendor(guid!("4c756d65-6e00-4b6f-9f2a-6c756d656e21"));
+const OS_INDICATIONS_BOOT_TO_FW_UI: u64 = 1;
+
+pub enum Outcome {
+    /// The loader ran and returned control to us.
+    Exited,
+    /// The loader could not be loaded or was refused before it ran.
+    Refused(Status),
+}
+
+/// Loads and starts `entry`. Only returns if the loader couldn't start or
+/// exited back to us.
+pub fn start(entry: &Entry) -> Outcome {
+    let image = match boot::load_image(
+        boot::image_handle(),
+        LoadImageSource::FromDevicePath { device_path: &entry.device_path, boot_policy: BootPolicy::ExactMatch },
+    ) {
+        Ok(image) => image,
+        Err(e) => return Outcome::Refused(e.status()),
+    };
+    if let Some(opts) = &entry.options {
+        if let (Ok(s), Ok(mut li)) = (CString16::try_from(opts.as_str()), boot::open_protocol_exclusive::<LoadedImage>(image)) {
+            // The loader may read its options at any time, so they must
+            // outlive this function.
+            let bytes: &'static [u16] = Box::leak(s.to_u16_slice_with_nul().to_vec().into_boxed_slice());
+            unsafe { li.set_load_options(bytes.as_ptr().cast(), (bytes.len() * 2) as u32) };
+        }
+    }
+    match boot::start_image(image) {
+        Ok(()) => Outcome::Exited,
+        // Deferred Secure Boot verdicts arrive from StartImage.
+        Err(e) if e.status() == Status::SECURITY_VIOLATION => Outcome::Refused(e.status()),
+        Err(_) => Outcome::Exited,
+    }
+}
+
+pub fn remember(entry: &Entry) {
+    let _ = runtime::set_variable(
+        cstr16!("LumenLastBoot"),
+        &VENDOR,
+        VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS,
+        entry.id.as_bytes(),
+    );
+}
+
+pub fn last_choice() -> Option<String> {
+    let (data, _) = runtime::get_variable_boxed(cstr16!("LumenLastBoot"), &VENDOR).ok()?;
+    String::from_utf8(data.into_vec()).ok()
+}
+
+fn read_u64(name: &uefi::CStr16) -> Option<u64> {
+    let (data, _) = runtime::get_variable_boxed(name, &VariableVendor::GLOBAL_VARIABLE).ok()?;
+    let mut b = [0u8; 8];
+    let n = data.len().min(8);
+    b[..n].copy_from_slice(&data[..n]);
+    Some(u64::from_le_bytes(b))
+}
+
+pub fn firmware_setup_supported() -> bool {
+    read_u64(cstr16!("OsIndicationsSupported")).is_some_and(|v| v & OS_INDICATIONS_BOOT_TO_FW_UI != 0)
+}
+
+pub fn reboot_to_firmware() -> Status {
+    let current = read_u64(cstr16!("OsIndications")).unwrap_or(0);
+    let r = runtime::set_variable(
+        cstr16!("OsIndications"),
+        &VariableVendor::GLOBAL_VARIABLE,
+        VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
+        &(current | OS_INDICATIONS_BOOT_TO_FW_UI).to_le_bytes(),
+    );
+    match r {
+        Ok(()) => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
+        Err(e) => e.status(),
+    }
+}
+
+pub fn restart() -> ! {
+    runtime::reset(ResetType::COLD, Status::SUCCESS, None)
+}
+
+pub fn shutdown() -> ! {
+    runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None)
+}
+
+/// Asks the firmware to boot its own `Boot####` entry on the next start and
+/// reboots. Slower than chainloading, but it is exactly how the firmware
+/// would have booted that OS by itself — immune to BitLocker PCR changes and
+/// to loaders that firmware can read but we can't.
+pub fn boot_next(num: u16) -> Status {
+    let r = runtime::set_variable(
+        cstr16!("BootNext"),
+        &VariableVendor::GLOBAL_VARIABLE,
+        VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
+        &num.to_le_bytes(),
+    );
+    match r {
+        Ok(()) => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
+        Err(e) => e.status(),
+    }
+}
+
+fn boot_order() -> Vec<u16> {
+    runtime::get_variable_boxed(cstr16!("BootOrder"), &VariableVendor::GLOBAL_VARIABLE)
+        .map(|(d, _)| d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+        .unwrap_or_default()
+}
+
+/// Description of firmware boot entry `num`.
+fn boot_description(num: u16) -> Option<String> {
+    let name = CString16::try_from(alloc::format!("Boot{num:04X}").as_str()).ok()?;
+    let (data, _) = runtime::get_variable_boxed(&name, &VariableVendor::GLOBAL_VARIABLE).ok()?;
+    let units: Vec<u16> = data.get(6..)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// If we were started from our own firmware entry but something (a Windows
+/// update, `grub-install`, a firmware reset) moved another entry in front
+/// of it, put Lumen back first. Never touches anything else.
+pub fn heal_boot_order() {
+    let Ok((cur, _)) = runtime::get_variable_boxed(cstr16!("BootCurrent"), &VariableVendor::GLOBAL_VARIABLE) else { return };
+    let Some(cur) = cur.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]])) else { return };
+    if !boot_description(cur).is_some_and(|d| d.trim().eq_ignore_ascii_case("lumen")) {
+        return; // started some other way (USB, F12 menu entry we don't own)
+    }
+    let mut order = boot_order();
+    if order.first() == Some(&cur) {
+        return;
+    }
+    order.retain(|&n| n != cur);
+    order.insert(0, cur);
+    let bytes: Vec<u8> = order.iter().flat_map(|n| n.to_le_bytes()).collect();
+    let attrs = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS;
+    if runtime::set_variable(cstr16!("BootOrder"), &VariableVendor::GLOBAL_VARIABLE, attrs, &bytes).is_ok() {
+        log::info!("moved Boot{cur:04X} (Lumen) back to the front of BootOrder");
+    }
+}

@@ -1,0 +1,587 @@
+//! Finds bootable operating systems by probing every mounted EFI file
+//! system for well-known loader paths.
+
+use crate::config::Config;
+use crate::gfx::rgb;
+use crate::icons::{Glyph, Icon};
+use crate::os;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use alloc::collections::BTreeSet;
+use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol, SearchType};
+use uefi::fs::{FileSystem, PathBuf};
+use uefi::proto::device_path::build::{self, DevicePathBuilder};
+use uefi::proto::device_path::media::PartitionSignature;
+use uefi::proto::device_path::{DevicePath, DevicePathNodeEnum, DeviceType};
+use uefi::proto::loaded_image::LoadedImage;
+use uefi::proto::media::block::BlockIO;
+use uefi::proto::media::file::{File, FileSystemVolumeLabel};
+use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::proto::ProtocolPointer;
+use uefi::runtime::{self, VariableVendor};
+use uefi::{cstr16, CString16, Handle};
+
+#[cfg(target_arch = "x86_64")]
+const ARCH: &str = "x64";
+#[cfg(target_arch = "aarch64")]
+const ARCH: &str = "aa64";
+
+pub struct Entry {
+    pub title: String,
+    /// Where it lives, e.g. "EFI system partition · Partition 1".
+    pub location: String,
+    pub file: String,
+    pub icon: Icon,
+    pub device_path: Box<DevicePath>,
+    pub options: Option<String>,
+    pub id: String,
+    /// Utilities (shell, removable media) sort after operating systems.
+    pub utility: bool,
+    /// The firmware's own `Boot####` entry for this loader, if it has one.
+    /// Used as a fallback: set `BootNext` and let the firmware boot it.
+    pub boot_option: Option<u16>,
+    /// Known only from NVRAM (file system not readable by firmware, e.g.
+    /// APFS without a driver); can only be started via `BootNext`.
+    pub nvram_only: bool,
+}
+
+/// Where Lumen itself was loaded from, so it doesn't list itself.
+pub struct SelfImage {
+    pub device: Option<Handle>,
+    pub part_key: Option<String>,
+    pub file: String,
+}
+
+impl SelfImage {
+    pub fn get() -> Self {
+        let img = open::<LoadedImage>(boot::image_handle());
+        let device = img.as_ref().and_then(|i| i.device());
+        let file = img.as_ref().and_then(|i| i.file_path().map(file_path_text)).unwrap_or_default();
+        let part_key = device.and_then(|d| partition_key(&open::<DevicePath>(d)?));
+        Self { device, part_key, file }
+    }
+
+    pub fn dir(&self) -> String {
+        match self.file.rfind('\\') {
+            Some(i) => self.file[..i].to_string(),
+            None => "\\EFI\\lumen".into(),
+        }
+    }
+}
+
+/// Opens a protocol non-exclusively, so firmware drivers keep working.
+pub fn open<P: ProtocolPointer + ?Sized>(handle: Handle) -> Option<ScopedProtocol<P>> {
+    let params = OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
+    unsafe { boot::open_protocol::<P>(params, OpenProtocolAttributes::GetProtocol) }.ok()
+}
+
+fn file_path_text(dp: &DevicePath) -> String {
+    let mut s = String::new();
+    for node in dp.node_iter() {
+        if let Ok(DevicePathNodeEnum::MediaFilePath(f)) = node.as_enum() {
+            let part = String::from_utf16_lossy(&f.path_name().to_vec());
+            let part = part.trim_end_matches('\0');
+            if !s.is_empty() && !s.ends_with('\\') && !part.starts_with('\\') {
+                s.push('\\');
+            }
+            s.push_str(part);
+        }
+    }
+    s
+}
+
+struct Volume {
+    fs: FileSystem,
+    part_key: Option<String>,
+    path: Box<DevicePath>,
+    label: String,
+    location: String,
+    removable: bool,
+}
+
+impl Volume {
+    fn open(handle: Handle) -> Option<Self> {
+        let path = open::<DevicePath>(handle)?.to_boxed();
+        let mut sfs = open::<SimpleFileSystem>(handle)?;
+        let label = sfs
+            .open_volume()
+            .ok()
+            .and_then(|mut root| root.get_boxed_info::<FileSystemVolumeLabel>().ok())
+            .map(|l| l.volume_label().to_string())
+            .unwrap_or_default();
+        let removable = open::<BlockIO>(handle).map(|b| b.media().is_removable_media()).unwrap_or(false);
+
+        let mut partition = None;
+        let mut bus = None;
+        for node in path.node_iter() {
+            match node.as_enum() {
+                Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => partition = Some(hd.partition_number()),
+                Ok(DevicePathNodeEnum::MessagingUsb(_) | DevicePathNodeEnum::MessagingUsbClass(_)) => bus = Some("USB drive"),
+                Ok(DevicePathNodeEnum::MessagingNvmeNamespace(_)) => bus = bus.or(Some("NVMe disk")),
+                Ok(DevicePathNodeEnum::MessagingSata(_) | DevicePathNodeEnum::MessagingAtapi(_)) => bus = bus.or(Some("SATA disk")),
+                Ok(DevicePathNodeEnum::MessagingSd(_) | DevicePathNodeEnum::MessagingEmmc(_)) => bus = bus.or(Some("SD/eMMC")),
+                Ok(DevicePathNodeEnum::MessagingScsi(_) | DevicePathNodeEnum::MessagingSasEx(_)) => bus = bus.or(Some("SCSI disk")),
+                _ => {}
+            }
+        }
+        let usb = bus == Some("USB drive");
+        let bus = if removable && !usb { "Removable disk" } else { bus.unwrap_or("Internal disk") };
+        let mut location = String::from(bus);
+        if !label.trim().is_empty() {
+            location = format!("{} · {}", label.trim(), location);
+        }
+        if let Some(p) = partition {
+            location = format!("{location} · Partition {p}");
+        }
+        let part_key = partition_key(&path);
+        Some(Self { fs: FileSystem::new(sfs), part_key, path, label, location, removable: removable || usb })
+    }
+
+    fn exists(&mut self, file: &str) -> bool {
+        CString16::try_from(file).map(|p| self.fs.try_exists(PathBuf::from(p)).unwrap_or(false)).unwrap_or(false)
+    }
+
+    fn list(&mut self, dir: &str, want_dirs: bool) -> Vec<String> {
+        let Ok(p) = CString16::try_from(dir) else { return Vec::new() };
+        let Ok(iter) = self.fs.read_dir(PathBuf::from(p)) else { return Vec::new() };
+        iter.filter_map(Result::ok)
+            .filter(|info| info.is_directory() == want_dirs)
+            .map(|info| info.file_name().to_string())
+            .filter(|n| n != "." && n != "..")
+            .collect()
+    }
+
+    fn entry(&self, title: String, file: String, icon: Icon, options: Option<String>, utility: bool) -> Entry {
+        Entry {
+            id: match &options {
+                None => format!("{}:{}", self.part_key.as_deref().unwrap_or(&self.location), file.to_lowercase()),
+                Some(o) => format!("{}:{}|{o}", self.part_key.as_deref().unwrap_or(&self.location), file.to_lowercase()),
+            },
+            device_path: file_device_path(&self.path, &file),
+            location: self.location.clone(),
+            title,
+            file,
+            icon,
+            options,
+            utility,
+            boot_option: None,
+            nvram_only: false,
+        }
+    }
+}
+
+/// Appends a file path node to a partition's device path.
+pub fn file_device_path(dev: &DevicePath, file: &str) -> Box<DevicePath> {
+    let mut buf = Vec::new();
+    let mut b = DevicePathBuilder::with_vec(&mut buf);
+    for node in dev.node_iter() {
+        b = b.push(&node).expect("device path node");
+    }
+    let name = CString16::try_from(file).unwrap_or_default();
+    b = b.push(&build::media::FilePath { path_name: &name }).expect("file path node");
+    b.finalize().expect("device path").to_boxed()
+}
+
+fn titlecase(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// Labels that say nothing about what's on a volume.
+fn generic_label(label: &str) -> bool {
+    let l = label.trim().to_lowercase();
+    l.is_empty() || matches!(l.as_str(), "efi" | "esp" | "efi system" | "efisys" | "no name" | "boot" | "system" | "usb" | "untitled")
+}
+
+/// Titles of boot menu entries in a GRUB config or systemd-boot entry.
+fn menu_titles(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in text.split(|&b| b == b'\n') {
+        let t = line.trim_ascii_start();
+        if t.starts_with(b"menuentry") || t.starts_with(b"title") || t.starts_with(b"submenu") {
+            out.extend_from_slice(t);
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
+impl Volume {
+    fn read(&mut self, path: &str, max: u64) -> Option<Vec<u8>> {
+        let p = PathBuf::from(CString16::try_from(path).ok()?);
+        let size = self.fs.metadata(&p).ok()?.file_size();
+        if size > max {
+            return None;
+        }
+        self.fs.read(&p).ok()
+    }
+
+    /// Works out what OS a volume's loader belongs to when the folder name
+    /// doesn't say (live/installer USBs, bare `\EFI\BOOT` loaders), from
+    /// strongest to weakest evidence.
+    fn identify_contents(&mut self, loader_dir: &str) -> Option<(&'static os::Os, bool)> {
+        // Windows installation media.
+        for f in ["\\sources\\install.wim", "\\sources\\install.esd", "\\sources\\install.swm", "\\sources\\boot.wim"] {
+            if self.exists(f) {
+                return Some((os::by_name("Windows")?, true));
+            }
+        }
+        // Debian/Ubuntu-style disc info, e.g. "Linux Mint 22 Wilma - Release amd64".
+        if let Some(found) = self.read("\\.disk\\info", 4096).and_then(|t| os::identify_text(&t)) {
+            return Some((found, false));
+        }
+        // Boot menu titles from systemd-boot entries and GRUB configs.
+        let mut titles = Vec::new();
+        for name in self.list("\\loader\\entries", false) {
+            if let Some(t) = self.read(&format!("\\loader\\entries\\{name}"), 64 * 1024) {
+                titles.extend(menu_titles(&t));
+            }
+        }
+        let mut configs = Vec::new();
+        for f in [format!("{loader_dir}\\grub.cfg"), "\\EFI\\BOOT\\grub.cfg".into(), "\\boot\\grub\\grub.cfg".into(), "\\boot\\grub\\loopback.cfg".into()] {
+            if let Some(t) = self.read(&f, 512 * 1024) {
+                titles.extend(menu_titles(&t));
+                configs.extend(t);
+            }
+        }
+        if let Some(found) = os::identify_text(&titles).or_else(|| os::identify_text(&configs)) {
+            return Some((found, false));
+        }
+        // A meaningful volume label ("Ubuntu 24.04 LTS amd64", "ARCH_202410").
+        if !generic_label(&self.label) {
+            if let Some(found) = os::identify(&self.label).filter(|o| o.name != "Linux") {
+                return Some((found, false));
+            }
+        }
+        // Finally the distro CA certificate inside its shim / GRUB.
+        let up = ARCH.to_uppercase();
+        for f in [format!("{loader_dir}\\BOOT{up}.EFI"), format!("{loader_dir}\\shim{ARCH}.efi"), format!("{loader_dir}\\grub{ARCH}.efi")] {
+            if let Some(found) = self.read(&f, 8 << 20).and_then(|b| os::identify_signer(&b)) {
+                return Some((found, false));
+            }
+        }
+        None
+    }
+}
+
+/// Loader file names inside `\EFI\<vendor>\`, in order of preference.
+/// shim first: under Secure Boot it's the one the firmware will accept.
+fn vendor_loaders() -> [String; 10] {
+    [
+        format!("shim{ARCH}.efi"),
+        "shim.efi".into(), // openSUSE
+        format!("grub{ARCH}.efi"),
+        "grub.efi".into(),
+        format!("systemd-boot{ARCH}.efi"),
+        format!("refind_{ARCH}.efi"),
+        "loader.efi".into(),            // FreeBSD
+        format!("bootloader{ARCH}.efi"), // Clear Linux
+        "xen.efi".into(),               // Qubes
+        "elilo.efi".into(),             // Slackware
+    ]
+}
+
+pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
+    let own_dir = me.dir().to_lowercase();
+    let mut entries = Vec::new();
+    let mut volumes = Vec::new();
+    let handles = boot::find_handles::<SimpleFileSystem>().unwrap_or_default();
+
+    for handle in handles {
+        let Some(mut vol) = Volume::open(handle) else { continue };
+        let is_self_volume = Some(handle) == me.device;
+        let mut found = Vec::new();
+
+        if vol.exists("\\EFI\\Microsoft\\Boot\\bootmgfw.efi") {
+            found.push(vol.entry("Windows".into(), "\\EFI\\Microsoft\\Boot\\bootmgfw.efi".into(), os::WINDOWS, None, false));
+        }
+        if vol.exists("\\System\\Library\\CoreServices\\boot.efi") {
+            let title = if generic_label(&vol.label) || vol.label.trim().eq_ignore_ascii_case("macintosh hd") {
+                String::from("macOS")
+            } else {
+                format!("macOS ({})", vol.label.trim())
+            };
+            found.push(vol.entry(title, "\\System\\Library\\CoreServices\\boot.efi".into(), os::MACOS, None, false));
+        }
+
+        for dir in vol.list("\\EFI", true) {
+            let lower = dir.to_lowercase();
+            let path = format!("\\EFI\\{dir}");
+            if matches!(lower.as_str(), "boot" | "microsoft" | "linux" | "tools" | "oem" | "dell" | "hp" | "lenovo")
+                || (is_self_volume && path.to_lowercase() == own_dir)
+            {
+                continue;
+            }
+            let Some(file) = vendor_loaders().into_iter().map(|n| format!("{path}\\{n}")).find(|f| vol.exists(f)) else {
+                continue;
+            };
+            let (title, icon) = match os::identify(&lower) {
+                // systemd-boot and plain GRUB folders don't say which distro;
+                // their menu entries usually do.
+                Some(o) if o.name == "Linux" => match vol.identify_contents(&path) {
+                    Some((o, _)) => (o.name.to_string(), o.icon),
+                    None => (String::from("Linux"), os::LINUX),
+                },
+                Some(o) => (o.name.to_string(), o.icon),
+                None => match vol.identify_contents(&path) {
+                    Some((o, _)) => (o.name.to_string(), o.icon),
+                    None => (titlecase(&dir), neutral_icon(&dir)),
+                },
+            };
+            found.push(vol.entry(title, file, icon, None, false));
+        }
+
+        // Unified kernel images (systemd-boot "type 2" entries).
+        for name in vol.list("\\EFI\\Linux", false) {
+            if !name.to_lowercase().ends_with(".efi") {
+                continue;
+            }
+            let stem = &name[..name.len() - 4];
+            let (title, icon) = match os::identify(stem) {
+                Some(o) if o.name != "Linux" => (o.name.to_string(), o.icon),
+                _ => (format!("Linux ({stem})"), os::LINUX),
+            };
+            found.push(vol.entry(title, format!("\\EFI\\Linux\\{name}"), icon, None, false));
+        }
+
+        for shell in [format!("\\EFI\\tools\\shell{ARCH}.efi"), format!("\\shell{ARCH}.efi")] {
+            if vol.exists(&shell) {
+                found.push(vol.entry("UEFI Shell".into(), shell, os::SHELL, None, true));
+                break;
+            }
+        }
+
+        if is_self_volume {
+            for c in &cfg.entries {
+                if vol.exists(&c.path) {
+                    let icon = os::identify(&c.title).map(|o| o.icon).unwrap_or(os::LINUX);
+                    found.push(vol.entry(c.title.clone(), c.path.clone(), icon, c.options.clone(), false));
+                }
+            }
+        }
+
+        // The removable-media fallback loader: live/installer USBs, rescue
+        // sticks, or an internal disk with nothing else recognisable on it.
+        let fallback = format!("\\EFI\\BOOT\\BOOT{}.EFI", ARCH.to_uppercase());
+        // Lumen itself may live in \EFI\BOOT (as the fallback loader or
+        // behind shim there); never list ourselves.
+        let is_self = is_self_volume && own_dir == "\\efi\\boot";
+        if !is_self && (vol.removable || found.is_empty()) && vol.exists(&fallback) {
+            let label = vol.label.trim().to_string();
+            let usb = if vol.removable { " (USB)" } else { "" };
+            let (title, icon) = match vol.identify_contents("\\EFI\\BOOT") {
+                Some((o, true)) => (format!("{} Setup{usb}", o.name), o.icon),
+                Some((o, false)) => (format!("{}{usb}", o.name), o.icon),
+                None if vol.removable && !generic_label(&label) => (label, os::DRIVE),
+                None if vol.removable => ("USB Drive".into(), os::DRIVE),
+                None => ("Boot Loader".into(), os::DRIVE),
+            };
+            found.push(vol.entry(title, fallback, icon, None, vol.removable));
+        }
+
+        volumes.push(vol);
+        entries.extend(found);
+    }
+
+    merge_firmware_entries(&mut entries, &mut volumes, me);
+
+    entries.retain(|e| {
+        let hay = format!("{} {}", e.title, e.file).to_lowercase();
+        !cfg.hide.iter().any(|h| hay.contains(h.as_str()))
+    });
+    // Stable sort: operating systems first, utilities last.
+    entries.sort_by_key(|e| e.utility);
+    disambiguate(&mut entries);
+    unique_ids(&mut entries);
+    for e in &entries {
+        log::info!("entry {:?} [{}] {}", e.title, e.id, e.location);
+    }
+    entries
+}
+
+/// Firmware in "fast boot" mode often only connects the boot disk. Connect
+/// every controller so second drives, NVMe and USB disks all expose their
+/// partitions before we look for operating systems.
+pub fn connect_all() {
+    if let Ok(handles) = boot::locate_handle_buffer(SearchType::AllHandles) {
+        for &h in handles.iter() {
+            let _ = boot::connect_controller(h, &[], None, true);
+        }
+    }
+}
+
+/// A stable identity for a partition: its GPT GUID (or MBR signature).
+fn partition_key(dp: &DevicePath) -> Option<String> {
+    dp.node_iter().find_map(|node| match node.as_enum() {
+        Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => Some(match hd.partition_signature() {
+            PartitionSignature::Guid(g) => format!("{g}"),
+            PartitionSignature::Mbr(s) => format!("{:02x}{:02x}{:02x}{:02x}-{}", s[0], s[1], s[2], s[3], hd.partition_number()),
+            _ => format!("part{}@{}", hd.partition_number(), hd.partition_start()),
+        }),
+        _ => None,
+    })
+}
+
+struct BootOption {
+    num: u16,
+    desc: String,
+    path: Box<DevicePath>,
+}
+
+/// Reads the firmware boot menu (`BootOrder` + `Boot####`). Every OS
+/// installer registers itself here, so this catches loaders at paths the
+/// file system scan doesn't know about.
+fn firmware_boot_options() -> Vec<BootOption> {
+    let Ok((order, _)) = runtime::get_variable_boxed(cstr16!("BootOrder"), &VariableVendor::GLOBAL_VARIABLE) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pair in order.chunks_exact(2) {
+        let num = u16::from_le_bytes([pair[0], pair[1]]);
+        let Ok(name) = CString16::try_from(format!("Boot{num:04X}").as_str()) else { continue };
+        let Ok((data, _)) = runtime::get_variable_boxed(&name, &VariableVendor::GLOBAL_VARIABLE) else { continue };
+        // EFI_LOAD_OPTION: u32 attributes, u16 path length, UCS-2 description, device path.
+        if data.len() < 8 {
+            continue;
+        }
+        let active = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) & 1 != 0;
+        let path_len = u16::from_le_bytes([data[4], data[5]]) as usize;
+        let mut desc_units = Vec::new();
+        let mut i = 6;
+        while i + 1 < data.len() {
+            let u = u16::from_le_bytes([data[i], data[i + 1]]);
+            i += 2;
+            if u == 0 {
+                break;
+            }
+            desc_units.push(u);
+        }
+        let Some(path_bytes) = data.get(i..i + path_len) else { continue };
+        let Ok(path) = <&DevicePath>::try_from(path_bytes) else { continue };
+        if active {
+            out.push(BootOption { num, desc: String::from_utf16_lossy(&desc_units), path: path.to_boxed() });
+        }
+    }
+    out
+}
+
+/// Partition keys of every partition the firmware can see, readable or not.
+fn present_partitions() -> BTreeSet<String> {
+    boot::find_handles::<BlockIO>()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|h| partition_key(&open::<DevicePath>(h)?))
+        .collect()
+}
+
+fn merge_firmware_entries(entries: &mut Vec<Entry>, volumes: &mut [Volume], me: &SelfImage) {
+    let present = present_partitions();
+    for opt in firmware_boot_options() {
+        log::info!("firmware entry Boot{:04X} {:?}: {}", opt.num, opt.desc, opt.path);
+        // Only entries pointing at a file on a partition; skips network
+        // boot, legacy BIOS (BBS) entries and firmware built-ins.
+        let file = file_path_text(&opt.path);
+        let Some(key) = partition_key(&opt.path) else {
+            log::info!("  skipped: not on a disk partition");
+            continue;
+        };
+        if file.is_empty() || opt.path.node_iter().any(|n| n.device_type() == DeviceType::BIOS_BOOT_SPEC) {
+            continue;
+        }
+        let id = format!("{key}:{}", file.to_lowercase());
+
+        // Already found by the scan: just remember its firmware entry.
+        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
+            log::info!("  matches scanned entry {:?}", e.title);
+            e.boot_option.get_or_insert(opt.num);
+            continue;
+        }
+        // Partition signatures aren't always unique (cloned disks), so the
+        // volume must also actually contain the loader.
+        let vol = volumes
+            .iter_mut()
+            .filter(|v| v.part_key.as_deref() == Some(key.as_str()))
+            .find_map(|v| v.exists(&file).then_some(&*v));
+        let is_self = me.part_key.as_deref() == Some(key.as_str()) && me.file.eq_ignore_ascii_case(&file);
+        if is_self || opt.desc.to_lowercase().contains("lumen") {
+            continue;
+        }
+        if vol.is_none() && !present.contains(&key) {
+            log::info!("  skipped: partition {key} no longer exists");
+            continue;
+        }
+
+        let desc = opt.desc.trim();
+        let (title, icon) = match os::identify(desc).or_else(|| os::identify(&file)) {
+            Some(o) if o.name != "Linux" => (o.name.to_string(), o.icon),
+            Some(o) if !desc.is_empty() => (desc.to_string(), o.icon),
+            _ if !desc.is_empty() => (desc.to_string(), neutral_icon(desc)),
+            _ => (String::from("Boot Loader"), os::DRIVE),
+        };
+        let (device_path, location, nvram_only) = match vol {
+            Some(v) => (file_device_path(&v.path, &file), v.location.clone(), false),
+            None => (opt.path.to_boxed(), String::from("Firmware boot entry"), true),
+        };
+        entries.push(Entry {
+            title,
+            location,
+            file,
+            icon,
+            device_path,
+            options: None,
+            id,
+            utility: false,
+            boot_option: Some(opt.num),
+            nvram_only,
+        });
+    }
+}
+
+/// Monogram for an OS we don't recognise.
+fn neutral_icon(name: &str) -> Icon {
+    let letter = name.chars().find(|c| c.is_alphanumeric()).unwrap_or('?').to_ascii_uppercase();
+    Icon { glyph: Glyph::Letter(letter), top: rgb(130, 140, 160), bottom: rgb(70, 78, 96), ink: rgb(255, 255, 255) }
+}
+
+/// Two entries with the same title (e.g. Windows on two disks, or an
+/// installed distro and its live USB) get the loader or volume appended.
+fn disambiguate(entries: &mut [Entry]) {
+    let renamed: Vec<Option<String>> = entries
+        .iter()
+        .map(|e| {
+            let same_title = entries.iter().filter(|o| o.title == e.title).count();
+            if same_title < 2 {
+                return None;
+            }
+            let same_volume = entries.iter().filter(|o| o.title == e.title && o.location == e.location).count();
+            let extra = if same_volume > 1 {
+                e.file.rsplit('\\').next().unwrap_or("")
+            } else {
+                e.location.split(" · ").next().unwrap_or("")
+            };
+            Some(format!("{} ({extra})", e.title))
+        })
+        .collect();
+    for (e, t) in entries.iter_mut().zip(renamed) {
+        if let Some(t) = t {
+            e.title = t;
+        }
+    }
+}
+
+/// Two USB sticks flashed from the same image carry identical partition
+/// signatures, so their ids collide. Suffix repeats so that "remember last
+/// choice" and hot-plug tracking stay unambiguous.
+fn unique_ids(entries: &mut [Entry]) {
+    for i in 1..entries.len() {
+        let repeats = entries[..i].iter().filter(|e| e.id == entries[i].id || e.id.starts_with(&format!("{}#", entries[i].id))).count();
+        if repeats > 0 {
+            entries[i].id = format!("{}#{}", entries[i].id, repeats + 1);
+        }
+    }
+}
