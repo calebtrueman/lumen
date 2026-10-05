@@ -151,6 +151,7 @@ function Initialize-FirmwareAccess {
         $script:UseBcdedit = $true
         Write-Log "Direct firmware variable access unavailable (privilege $priv, read error $err); using bcdedit."
     } else {
+        $script:AccessProven = $true
         Write-Log 'Using direct firmware variable access.'
     }
 }
@@ -226,9 +227,14 @@ function New-LoadOption($part, [string]$file, [string]$desc) {
     [byte[]]([BitConverter]::GetBytes([uint32]1) + [BitConverter]::GetBytes([uint16]$path.Length) + $d + $path)
 }
 
+$script:AccessProven = $false
 function Test-BootSlotFree([uint16]$n) {
-    # Only "not found" (203) means free; any other read error means unknown.
-    $null -eq [LumenFw]::Get(('Boot{0:X4}' -f $n), [LumenFw]::GlobalGuid) -and [LumenFw]::LastGetError -eq 203
+    # "Not found" (203) means free. Some firmware (Hyper-V) reports missing
+    # variables as 1314 instead; that only counts as free once we've proven
+    # we can read existing boot entries, so a real access problem can never
+    # make us overwrite an entry.
+    $null -eq [LumenFw]::Get(('Boot{0:X4}' -f $n), [LumenFw]::GlobalGuid) -and
+        ([LumenFw]::LastGetError -eq 203 -or ($script:AccessProven -and [LumenFw]::LastGetError -eq 1314))
 }
 
 function New-LumenEntry {
@@ -253,6 +259,8 @@ function New-LumenEntry {
     if (-not $id) { throw "Windows couldn't create a boot entry either: $out" }
     $set = bcdedit /set $id path $Loader 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { bcdedit /delete $id | Out-Null; throw "Windows couldn't point the boot entry at Lumen: $set" }
+    # The firmware entry only exists once it's in the firmware boot order.
+    bcdedit /set '{fwbootmgr}' displayorder $id /addlast | Out-Null
     $found = Find-LumenEntry
     if ($null -eq $found) { bcdedit /delete $id | Out-Null; throw "The firmware didn't keep the new boot entry." }
     Write-Log "Created boot entry Boot$('{0:X4}' -f $found) via bcdedit."
