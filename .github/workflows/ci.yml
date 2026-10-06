@@ -14,6 +14,7 @@ jobs:
       - name: Toolchain
         run: |
           rustup toolchain install   # the pinned nightly, targets and rust-src from rust-toolchain.toml
+          (cd installer/windows && rustup toolchain install)   # stable, for the Windows launcher
           sudo apt-get update -qq
           sudo apt-get install -y -qq osslsigncode mingw-w64 >/dev/null
       - name: Build (signed with a throwaway test key, not the release key)

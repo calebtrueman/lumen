@@ -1,0 +1,4 @@
+# Host tool: stable Rust (the pinned nightly is only for the UEFI boot code).
+[toolchain]
+channel = "stable"
+profile = "minimal"

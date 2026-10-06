@@ -1,0 +1,6 @@
+# The Windows launcher builds with stable Rust (the repository's pinned nightly
+# is only needed for the UEFI boot code's custom target).
+[toolchain]
+channel = "stable"
+targets = ["x86_64-pc-windows-gnu"]
+profile = "minimal"
