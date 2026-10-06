@@ -3,6 +3,7 @@
 
   tools/test/linux-direct.py DISK.qcow2 [--secureboot] [--expect NAME] [--shot NAME]
   tools/test/linux-direct.py target/fixtures/unsigned-linux.img --secureboot --expect-refusal
+  tools/test/linux-direct.py ubuntu.qcow2 --secureboot --expect-fallback
 
 DISK is an untouched x86_64 distro image (e.g. Debian's
 debian-13-genericcloud-amd64.qcow2), attached read-only (snapshot). Lumen
@@ -23,6 +24,10 @@ Debian-signed kernel must then pass shim's check and boot.
 
 With --expect-refusal: the kernel isn't signed (tools/test/make-unsigned-disk.sh)
 and passing means Lumen refused to start it.
+
+With --expect-fallback: under Secure Boot a kernel signed only by its own
+distro's key (Ubuntu, Fedora...) must be refused by Debian's shim, and
+Lumen must then start the distro's own shim + GRUB, which boots it.
 
 Build first:  cargo efi-x64 --features debugcon
 """
@@ -45,6 +50,7 @@ def main():
     expect = args[args.index("--expect") + 1] if "--expect" in args else None
     shot = args[args.index("--shot") + 1] if "--shot" in args else None
     refusal = "--expect-refusal" in args
+    fallback = "--expect-fallback" in args
 
     shutil.rmtree(OUT, ignore_errors=True)
     esp = os.path.join(OUT, "esp", "EFI", "BOOT")
@@ -93,7 +99,13 @@ def main():
             if "direct start of" in debug:
                 why = "direct start failed: " + debug.split("direct start of", 1)[1].splitlines()[0]
                 ok = refusal and "isn't signed by a key this PC trusts" in why
-                break
+                if not (fallback and "isn't signed by a key this PC trusts" in why):
+                    break
+                # Refused as expected: now the distro's loader must boot it.
+                if any(m in serial for m in ("login:", "Reached target", "Welcome to", "systemd[1]")):
+                    ok, why = True, "refused, then the distro's own loader booted it"
+                    break
+                continue
             if refusal and "Linux version" in serial:
                 why = "an unsigned kernel was started"
                 break
