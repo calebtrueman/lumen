@@ -18,8 +18,26 @@ want_opt = struct.pack("<IH", 1, len(path)) + "Lumen\0".encode("utf-16-le") + pa
 cert = open(os.path.join(ROOT, "release", "lumen.cer"), "rb").read()
 new = mok_request.mok_new(cert)
 
+# Debian shim's CA, as shim stores it (.vendor_cert section).
+def vendor_cert(d):
+    pe, = struct.unpack_from("<I", d, 0x3C)
+    n, = struct.unpack_from("<H", d, pe + 6)
+    opt, = struct.unpack_from("<H", d, pe + 20)
+    symtab, nsym = struct.unpack_from("<II", d, pe + 12)
+    for i in range(n):
+        name, _, _, _, rp = struct.unpack_from("<8sIIII", d, pe + 24 + opt + i * 40)
+        name = name.rstrip(b"\0")
+        if name.startswith(b"/"):
+            o = symtab + nsym * 18 + int(name[1:])
+            name = d[o:d.index(b"\0", o)]
+        if name == b".vendor_cert":
+            size, _, off, _ = struct.unpack_from("<IIII", d, rp)
+            return d[rp + off:rp + off + size]
+vc = vendor_cert(open(os.path.join(ROOT, "vendor", "shim", "x86_64", "shimx64.efi"), "rb").read())
+
 ok = True
-for k, want in [("option", want_opt), ("mok_new", new), ("mok_auth", mok_request.mok_auth(new, "hunter2"))]:
+for k, want in [("option", want_opt), ("mok_new", new), ("mok_auth", mok_request.mok_auth(new, "hunter2")),
+                ("vendor_cert", vc), ("mok_new2", mok_request.mok_new(cert, vc))]:
     match = got[k] == want
     ok &= match
     print(f"{k:9} {'OK' if match else 'MISMATCH'}")

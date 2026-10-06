@@ -34,6 +34,7 @@ param(
     [switch]$Uninstall,
     [switch]$Gui,
     [switch]$Yes,
+    [switch]$NoDistroKeys,
     [string]$Code,
     [string]$Bundle = $PSScriptRoot
 )
@@ -348,18 +349,97 @@ function Test-LumenFiles { Use-Esp { param($esp) Test-Path "$esp$Loader" } }
 
 # ---- Secure Boot key enrollment --------------------------------------------
 
-function Get-MokRequest([byte[]]$cert, [string]$password) {
-    # Same request mokutil --import writes: MokNew = EFI_SIGNATURE_LIST with
-    # the certificate; MokAuth = SHA-256(MokNew || password as UTF-16LE).
-    $sigSize = 16 + $cert.Length
-    [byte[]]$new = ([Guid]'a5c059a1-94e4-4aa7-87b5-ab155c2bf072').ToByteArray() +
-        [BitConverter]::GetBytes([uint32](28 + $sigSize)) + [BitConverter]::GetBytes([uint32]0) +
-        [BitConverter]::GetBytes([uint32]$sigSize) + ([Guid]'605dab50-e046-4300-abb6-3dd810dd8b23').ToByteArray() + $cert
+function Get-MokRequest([object[]]$certs, [string]$password) {
+    # Same request mokutil --import writes: MokNew = one EFI_SIGNATURE_LIST
+    # per certificate; MokAuth = SHA-256(MokNew || password as UTF-16LE).
+    [byte[]]$new = @()
+    foreach ($cert in $certs) {
+        [byte[]]$cert = $cert
+        $sigSize = 16 + $cert.Length
+        $new += ([Guid]'a5c059a1-94e4-4aa7-87b5-ab155c2bf072').ToByteArray() +
+            [BitConverter]::GetBytes([uint32](28 + $sigSize)) + [BitConverter]::GetBytes([uint32]0) +
+            [BitConverter]::GetBytes([uint32]$sigSize) + ([Guid]'605dab50-e046-4300-abb6-3dd810dd8b23').ToByteArray() + $cert
+    }
     [byte[]]$auth = [Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]($new + [Text.Encoding]::Unicode.GetBytes($password)))
     @{ New = $new; Auth = $auth }
 }
 
 function Test-SecureBoot { try { Confirm-SecureBootUEFI } catch { $false } }
+
+# The CA certificate(s) a distro's shim carries in its ".vendor_cert" PE
+# section: one DER certificate, or an EFI signature list of them.
+function Get-VendorCerts([byte[]]$d) {
+    $u16 = { param($o) [int][BitConverter]::ToUInt16($d, $o) }
+    $u32 = { param($o) [long][BitConverter]::ToUInt32($d, $o) }
+    if ($d.Length -lt 64 -or $d[0] -ne 0x4D -or $d[1] -ne 0x5A) { return @() }
+    $pe = & $u32 60
+    if ($pe + 24 -gt $d.Length -or (& $u32 $pe) -ne 0x4550) { return @() }
+    $n = & $u16 ($pe + 6); $opt = & $u16 ($pe + 20)
+    $strtab = (& $u32 ($pe + 12)) + (& $u32 ($pe + 16)) * 18
+    $st = $pe + 24 + $opt
+    for ($i = 0; $i -lt [Math]::Min($n, 64); $i++) {
+        $o = $st + $i * 40
+        $name = [Text.Encoding]::ASCII.GetString($d, $o, 8).TrimEnd([char]0)
+        if ($name -match '^/(\d+)$') {
+            $so = $strtab + [int]$Matches[1]
+            $end = [Array]::IndexOf($d, [byte]0, [int]$so)
+            if ($end -gt $so) { $name = [Text.Encoding]::ASCII.GetString($d, $so, $end - $so) }
+        }
+        if ($name -ne '.vendor_cert') { continue }
+        $rp = & $u32 ($o + 20)
+        $size = & $u32 $rp; $off = & $u32 ($rp + 8)
+        if ($size -le 0 -or $size -gt 65536 -or $rp + $off + $size -gt $d.Length) { return @() }
+        $blob = New-Object byte[] $size
+        [Array]::Copy($d, $rp + $off, $blob, 0, $size)
+        if ($blob[0] -eq 0x30) { return ,$blob }
+        $certs = @(); $at = 0
+        $x509 = ([Guid]'a5c059a1-94e4-4aa7-87b5-ab155c2bf072').ToByteArray()
+        while ($at + 28 -le $blob.Length) {
+            $lsize = [BitConverter]::ToUInt32($blob, $at + 16); $hsize = [BitConverter]::ToUInt32($blob, $at + 20); $ssize = [BitConverter]::ToUInt32($blob, $at + 24)
+            if ($lsize -lt 28 -or $ssize -le 16) { break }
+            if ([Convert]::ToBase64String($blob, $at, 16) -eq [Convert]::ToBase64String($x509)) {
+                for ($s = $at + 28 + $hsize; $s + $ssize -le $at + $lsize; $s += $ssize) {
+                    $c = New-Object byte[] ($ssize - 16)
+                    [Array]::Copy($blob, $s + 16, $c, 0, $ssize - 16)
+                    $certs += ,$c
+                }
+            }
+            $at += $lsize
+        }
+        return $certs
+    }
+    @()
+}
+
+# The signing certificates of the Linux distributions installed here, read
+# from their shims on the EFI system partition, minus Debian's (built into
+# the shim Lumen uses). Approved with Lumen's key, they let Lumen start those
+# distros' kernels directly under Secure Boot, verified by shim.
+function Get-DistroKeys {
+    Use-Esp {
+        param($esp)
+        $own = @(if (Test-Path "$esp$Loader") { Get-VendorCerts ([IO.File]::ReadAllBytes("$esp$Loader")) })
+        $seen = @{}; $certs = @(); $names = @()
+        $shims = @(Get-ChildItem "$esp\EFI" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'lumen', 'Microsoft' } |
+            ForEach-Object { Get-ChildItem $_.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(shim.*|boot(x64|aa64))\.efi$' } })
+        foreach ($f in $shims) {
+            foreach ($c in (Get-VendorCerts ([IO.File]::ReadAllBytes($f.FullName)))) {
+                $k = [Convert]::ToBase64String($c)
+                if ($seen[$k] -or ($own | Where-Object { [Convert]::ToBase64String($_) -eq $k })) { continue }
+                $seen[$k] = $true
+                $certs += ,$c
+                $text = [Text.Encoding]::ASCII.GetString($c)
+                $name = switch -Regex ($text) {
+                    'Canonical' { 'Ubuntu' } 'Fedora' { 'Fedora' } 'openSUSE' { 'openSUSE' } 'SUSE' { 'SUSE' }
+                    'AlmaLinux' { 'AlmaLinux' } 'Rocky' { 'Rocky Linux' } 'CentOS' { 'CentOS' } 'Red Hat' { 'Red Hat' }
+                    'Oracle' { 'Oracle Linux' } default { if ($f.Directory.Name -match '^boot$') { 'Linux' } else { $f.Directory.Name } }
+                }
+                if ($name -notin $names) { $names += $name }
+            }
+        }
+        @{ Certs = $certs; Names = $names }
+    }
+}
 
 function Test-KeyEnrolled([byte[]]$cert) {
     [LumenFw]::IndexOf([LumenFw]::Get('MokListRT', [LumenFw]::ShimGuid), $cert) -ge 0
@@ -486,6 +566,15 @@ function Get-InstallState {
     $bitlocker = $false
     try { $bitlocker = (Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop).ProtectionStatus -eq 'On' } catch {}
     $enrolled = Test-KeyEnrolled $cert
+    $keys = @(if (-not $enrolled) { ,$cert })
+    $distros = @()
+    if (-not $NoDistroKeys) {
+        try {
+            $dk = Get-DistroKeys
+            foreach ($c in $dk.Certs) { if (-not (Test-KeyEnrolled $c)) { $keys += ,$c } }
+            if ($keys.Count -gt [int](-not $enrolled)) { $distros = $dk.Names }
+        } catch { Write-Log "Couldn't read the installed distros' signing keys: $($_.Exception.Message)" }
+    }
     if ($script:UseBcdedit -and -not $enrolled) {
         if ($sb) {
             throw "Secure Boot is on, but this account can't change firmware settings, which the one-time Secure Boot approval needs. Run the installer from a regular administrator account."
@@ -497,7 +586,9 @@ function Get-InstallState {
         SecureBoot = $sb
         # Approval is asked for even with Secure Boot off, so turning it on
         # later doesn't stop Lumen from starting.
-        NeedsKey = -not $enrolled -and -not $script:UseBcdedit
+        NeedsKey = $keys.Count -gt 0 -and -not $script:UseBcdedit
+        Keys = $keys
+        Distros = $distros
         BitLocker = $bitlocker
     }
 }
@@ -592,11 +683,10 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
 
         if ($state.NeedsKey) {
             & $progress 'Preparing Secure Boot approval…'
-            [byte[]]$cert = [IO.File]::ReadAllBytes((Join-Path $Bundle 'lumen.cer'))
-            $req = Get-MokRequest $cert $code
+            $req = Get-MokRequest $state.Keys $code
             [LumenFw]::Set('MokNew', [LumenFw]::ShimGuid, $req.New, [LumenFw]::NvBsRt)
             [LumenFw]::Set('MokAuth', [LumenFw]::ShimGuid, $req.Auth, [LumenFw]::NvBsRt)
-            Write-Log 'Queued Secure Boot key approval.'
+            Write-Log "Queued Secure Boot key approval ($($state.Keys.Count) key(s)$(if ($state.Distros) { '; distros: ' + ($state.Distros -join ', ') }))."
         }
         Write-Log "Install of Lumen $Version finished."
     } catch {
@@ -861,6 +951,9 @@ function Start-Gui {
                 $lines += ''
                 $lines += $(if ($state.SecureBoot) { 'Secure Boot stays on. You will approve Lumen once on the next restart.' }
                             else { 'You will approve Lumen once on the next restart, so it keeps working if you turn on Secure Boot later.' })
+                if ($state.Distros) {
+                    $lines += "The same approval includes the signing keys of $($state.Distros -join ', '), so Lumen can start them directly instead of through GRUB."
+                }
             }
             if ($Legacy) {
                 $lines = @(
