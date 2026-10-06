@@ -247,13 +247,6 @@ pub fn sd_rrect(px: f32, py: f32, hw: f32, hh: f32, r: f32) -> f32 {
     len(qx.max(0.0), qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
-/// Approximate ellipse distance; accurate enough for anti-aliasing.
-#[inline]
-pub fn sd_ellipse(px: f32, py: f32, rx: f32, ry: f32) -> f32 {
-    let k = len(px / rx, py / ry);
-    (k - 1.0) * rx.min(ry)
-}
-
 /// Capsule (thick line segment) from a to b with radius r.
 #[inline]
 pub fn sd_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, r: f32) -> f32 {
@@ -283,13 +276,6 @@ pub fn sd_arc(px: f32, py: f32, r: f32, t: f32, dir: f32, gap: f32) -> f32 {
     } else {
         fabsf(len(px, py) - r) - t / 2.0
     }
-}
-
-/// Polynomial smooth minimum, blends two shapes together.
-#[inline]
-pub fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = clamp01(0.5 + 0.5 * (b - a) / k);
-    b + (a - b) * h - k * h * (1.0 - h)
 }
 
 /// Background: deep gradient with soft aurora blobs, ordered-dithered so
@@ -375,4 +361,69 @@ pub fn draw_cursor(cv: &mut Canvas, x: f32, y: f32, size: f32) {
     let line = 1.3 * u.max(0.8);
     cv.paint(b, 1.0, |px, py| sd_polygon(px, py, &v) - line, |_, _| rgb(20, 20, 26));
     cv.paint(b, 1.0, |px, py| sd_polygon(px, py, &v), |_, _| rgb(255, 255, 255));
+}
+
+/// A full-colour image: premultiplied RGBA, row-major.
+#[derive(Debug, PartialEq)]
+pub struct Sprite {
+    pub w: usize,
+    pub h: usize,
+    pub rgba: &'static [u8],
+}
+
+impl Canvas {
+    /// Draw `img` scaled into the box (x, y, w, h). Each target pixel
+    /// averages the source pixels it covers (area filter), so large
+    /// reductions stay smooth instead of aliasing.
+    pub fn image(&mut self, img: &Sprite, x: f32, y: f32, w: f32, h: f32, alpha: f32) {
+        let a = clamp01(alpha);
+        if a <= 0.002 || w < 1.0 || h < 1.0 {
+            return;
+        }
+        let (x0, y0, x1, y1) = self.clip((x, y, x + w - 1.0, y + h - 1.0));
+        let (sx, sy) = (img.w as f32 / w, img.h as f32 / h);
+        for py in y0..y1 {
+            let fy0 = ((py as f32 - y) * sy).max(0.0);
+            let fy1 = ((py as f32 + 1.0 - y) * sy).min(img.h as f32);
+            if fy1 <= fy0 {
+                continue;
+            }
+            let (ry0, ry1) = (fy0 as usize, (libm::ceilf(fy1) as usize).min(img.h));
+            for px in x0..x1 {
+                let fx0 = ((px as f32 - x) * sx).max(0.0);
+                let fx1 = ((px as f32 + 1.0 - x) * sx).min(img.w as f32);
+                if fx1 <= fx0 {
+                    continue;
+                }
+                let (rx0, rx1) = (fx0 as usize, (libm::ceilf(fx1) as usize).min(img.w));
+                let mut acc = [0.0f32; 4];
+                let mut wsum = 0.0;
+                for iy in ry0..ry1 {
+                    let wy = (fy1.min(iy as f32 + 1.0) - fy0.max(iy as f32)).max(0.0);
+                    for ix in rx0..rx1 {
+                        let wx = (fx1.min(ix as f32 + 1.0) - fx0.max(ix as f32)).max(0.0);
+                        let wgt = wx * wy;
+                        let i = (iy * img.w + ix) * 4;
+                        for c in 0..4 {
+                            acc[c] += img.rgba[i + c] as f32 * wgt;
+                        }
+                        wsum += wgt;
+                    }
+                }
+                if wsum <= 0.0 {
+                    continue;
+                }
+                let sa = acc[3] / wsum / 255.0 * a;
+                if sa <= 0.002 {
+                    continue;
+                }
+                // Premultiplied "over": dst = src + dst * (1 - src_alpha).
+                let idx = py * self.w + px;
+                let (dr, dg, db) = channels(self.px[idx]);
+                let k = 1.0 - sa;
+                let ch = |c: usize, d: f32| (acc[c] / wsum * a + d * k).clamp(0.0, 255.0) as u32;
+                self.px[idx] = (ch(0, dr) << 16) | (ch(1, dg) << 8) | ch(2, db);
+            }
+        }
+    }
 }

@@ -9,7 +9,6 @@ use libm::{atan2f, cosf, fabsf, sinf};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Glyph {
     Windows,
-    Tux,
     Gear,
     Drive,
     Shell,
@@ -18,6 +17,8 @@ pub enum Glyph {
     /// A glyph from the Font Awesome brands font.
     Brand(char),
     Letter(char),
+    /// A full-colour image, drawn to fill most of the tile.
+    Image(&'static Sprite),
 }
 
 /// An app-icon style tile: a gradient squircle with a glyph on it.
@@ -27,12 +28,14 @@ pub struct Icon {
     pub top: Color,
     pub bottom: Color,
     pub ink: Color,
+    /// Glow colour behind the selected card; defaults to the tile colour.
+    pub glow: Option<Color>,
 }
 
 impl Icon {
     /// Colour used for the glow behind the selected card.
     pub fn accent(self) -> Color {
-        mix(self.top, self.bottom, 0.4)
+        self.glow.unwrap_or(mix(self.top, self.bottom, 0.4))
     }
 }
 
@@ -71,10 +74,15 @@ fn draw_glyph(cv: &mut Canvas, text: &mut Text, icon: Icon, cx: f32, cy: f32, u:
                 cv.paint(bounds, alpha, |px, py| sd_rrect(px - qx, py - qy, q / 2.0, q / 2.0, u * 0.012), |_, _| ink);
             }
         }
-        Glyph::Tux => draw_tux(cv, cx, cy + u * 0.02, u * 0.95, alpha),
         Glyph::Logo(c) => text.draw_glyph_centered(cv, Face::Logos, c, u * 0.56, cx, cy, ink, alpha),
         Glyph::Brand(c) => text.draw_glyph_centered(cv, Face::Brands, c, u * 0.52, cx, cy, ink, alpha),
         Glyph::Letter(c) => text.draw_glyph_centered(cv, Face::Display, c, u * 0.6, cx, cy, ink, alpha),
+        Glyph::Image(img) => {
+            // Fit the image's height to 74% of the tile, keeping its aspect.
+            let h = u * 0.74;
+            let w = h * img.w as f32 / img.h as f32;
+            cv.image(img, cx - w / 2.0, cy - h / 2.0 + u * 0.02, w, h, alpha);
+        }
         Glyph::Gear => draw_gear(cv, cx, cy, u * 0.6, ink, alpha),
         Glyph::Drive => {
             let (w, h) = (u * 0.5, u * 0.3);
@@ -103,40 +111,6 @@ fn draw_glyph(cv: &mut Canvas, text: &mut Text, icon: Icon, cx: f32, cy: f32, u:
             cv.paint(bounds, alpha, |px, py| sd_segment(px, py, cx, cy + u * 0.1, cx + u * 0.18, cy + u * 0.1, t), |_, _| ink);
         }
     }
-}
-
-fn draw_tux(cv: &mut Canvas, cx: f32, cy: f32, u: f32, alpha: f32) {
-    let black = rgb(24, 24, 28);
-    let belly = rgb(250, 250, 248);
-    let orange = rgb(250, 160, 30);
-    let b = (cx - u / 2.0, cy - u / 2.0, cx + u / 2.0, cy + u / 2.0);
-    // Feet
-    for s in [-1.0, 1.0] {
-        let fx = cx + s * u * 0.095;
-        cv.paint(b, alpha, |px, py| sd_ellipse(px - fx, py - (cy + u * 0.29), u * 0.095, u * 0.042), |_, _| orange);
-    }
-    // Body + head
-    cv.paint(
-        b,
-        alpha,
-        |px, py| {
-            let body = sd_ellipse(px - cx, py - (cy + u * 0.05), u * 0.19, u * 0.25);
-            let head = len(px - cx, py - (cy - u * 0.16)) - u * 0.13;
-            smin(body, head, u * 0.06)
-        },
-        |_, _| black,
-    );
-    // Belly
-    cv.paint(b, alpha, |px, py| sd_ellipse(px - cx, py - (cy + u * 0.1), u * 0.125, u * 0.18), |_, _| belly);
-    // Eyes
-    for s in [-1.0, 1.0] {
-        let ex = cx + s * u * 0.048;
-        let ey = cy - u * 0.185;
-        cv.paint(b, alpha, |px, py| sd_ellipse(px - ex, py - ey, u * 0.033, u * 0.042), |_, _| belly);
-        cv.circle(ex + s * u * 0.01, ey + u * 0.008, u * 0.018, black, alpha);
-    }
-    // Beak
-    cv.paint(b, alpha, |px, py| sd_ellipse(px - cx, py - (cy - u * 0.118), u * 0.062, u * 0.032), |_, _| orange);
 }
 
 pub fn draw_gear(cv: &mut Canvas, cx: f32, cy: f32, d: f32, c: Color, alpha: f32) {

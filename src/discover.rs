@@ -561,7 +561,7 @@ fn merge_firmware_entries(entries: &mut Vec<Entry>, volumes: &mut [Volume], me: 
 /// Monogram for an OS we don't recognise.
 fn neutral_icon(name: &str) -> Icon {
     let letter = name.chars().find(|c| c.is_alphanumeric()).unwrap_or('?').to_ascii_uppercase();
-    Icon { glyph: Glyph::Letter(letter), top: rgb(130, 140, 160), bottom: rgb(70, 78, 96), ink: rgb(255, 255, 255) }
+    Icon { glyph: Glyph::Letter(letter), top: rgb(130, 140, 160), bottom: rgb(70, 78, 96), ink: rgb(255, 255, 255), glow: None }
 }
 
 /// Two entries with the same title (e.g. Windows on two disks, or an

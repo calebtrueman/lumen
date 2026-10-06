@@ -21,24 +21,31 @@ pub struct Os {
 const W: Color = rgb(255, 255, 255);
 
 const fn logo(c: char, top: Color, bottom: Color) -> Icon {
-    Icon { glyph: Glyph::Logo(c), top, bottom, ink: W }
+    Icon { glyph: Glyph::Logo(c), top, bottom, ink: W, glow: None }
 }
 const fn brand(c: char, top: Color, bottom: Color) -> Icon {
-    Icon { glyph: Glyph::Brand(c), top, bottom, ink: W }
+    Icon { glyph: Glyph::Brand(c), top, bottom, ink: W, glow: None }
 }
 const fn letter(c: char, top: Color, bottom: Color) -> Icon {
-    Icon { glyph: Glyph::Letter(c), top, bottom, ink: W }
+    Icon { glyph: Glyph::Letter(c), top, bottom, ink: W, glow: None }
 }
 const fn os(name: &'static str, keys: &'static [&'static str], icon: Icon) -> Os {
     Os { name, keys, icon }
 }
 
-pub const WINDOWS: Icon = Icon { glyph: Glyph::Windows, top: rgb(0, 164, 239), bottom: rgb(0, 92, 190), ink: W };
-pub const LINUX: Icon = Icon { glyph: Glyph::Tux, top: rgb(255, 214, 92), bottom: rgb(232, 150, 20), ink: W };
-pub const MACOS: Icon = Icon { glyph: Glyph::Brand('\u{f179}'), top: rgb(246, 246, 248), bottom: rgb(196, 198, 206), ink: rgb(28, 28, 32) };
-pub const SHELL: Icon = Icon { glyph: Glyph::Shell, top: rgb(60, 66, 80), bottom: rgb(22, 24, 32), ink: W };
-pub const DRIVE: Icon = Icon { glyph: Glyph::Drive, top: rgb(110, 150, 190), bottom: rgb(50, 80, 120), ink: W };
-pub const GEAR: Icon = Icon { glyph: Glyph::Gear, top: rgb(120, 128, 145), bottom: rgb(58, 64, 80), ink: W };
+pub const WINDOWS: Icon = Icon { glyph: Glyph::Windows, top: rgb(0, 164, 239), bottom: rgb(0, 92, 190), ink: W, glow: None };
+/// Tux by Larry Ewing (lewing@isc.tamu.edu) and The GIMP; SVG by Simon Budig
+/// and Garrett LeSage. Rendered to 216x256 premultiplied RGBA.
+pub static TUX_IMAGE: crate::gfx::Sprite =
+    crate::gfx::Sprite { w: 216, h: 256, rgba: include_bytes!("../assets/tux.rgba") };
+
+/// Full-colour Tux on a dark slate tile, glowing in his beak-and-feet yellow.
+pub const LINUX: Icon =
+    Icon { glyph: Glyph::Image(&TUX_IMAGE), top: rgb(70, 76, 96), bottom: rgb(28, 31, 42), ink: W, glow: Some(rgb(245, 180, 40)) };
+pub const MACOS: Icon = Icon { glyph: Glyph::Brand('\u{f179}'), top: rgb(246, 246, 248), bottom: rgb(196, 198, 206), ink: rgb(28, 28, 32), glow: None };
+pub const SHELL: Icon = Icon { glyph: Glyph::Shell, top: rgb(60, 66, 80), bottom: rgb(22, 24, 32), ink: W, glow: None };
+pub const DRIVE: Icon = Icon { glyph: Glyph::Drive, top: rgb(110, 150, 190), bottom: rgb(50, 80, 120), ink: W, glow: None };
+pub const GEAR: Icon = Icon { glyph: Glyph::Gear, top: rgb(120, 128, 145), bottom: rgb(58, 64, 80), ink: W, glow: None };
 
 pub static ALL: &[Os] = &[
     // ---- Windows & Apple ------------------------------------------------
@@ -117,7 +124,7 @@ pub static ALL: &[Os] = &[
     os("ChimeraOS", &["chimeraos"], letter('C', rgb(70, 90, 200), rgb(30, 40, 120))),
     // ---- BSD & others --------------------------------------------------------
     os("FreeBSD", &["freebsd"], logo('\u{f30c}', rgb(235, 0, 40), rgb(150, 0, 20))),
-    os("OpenBSD", &["openbsd"], Icon { glyph: Glyph::Logo('\u{f328}'), top: rgb(255, 215, 80), bottom: rgb(220, 160, 0), ink: rgb(30, 30, 30) }),
+    os("OpenBSD", &["openbsd"], Icon { glyph: Glyph::Logo('\u{f328}'), top: rgb(255, 215, 80), bottom: rgb(220, 160, 0), ink: rgb(30, 30, 30), glow: None }),
     os("NetBSD", &["netbsd"], letter('N', rgb(242, 103, 17), rgb(180, 60, 0))),
     os("GhostBSD", &["ghostbsd"], letter('G', rgb(80, 90, 110), rgb(30, 35, 50))),
     os("illumos", &["illumos", "openindiana", "omnios"], logo('\u{f326}', rgb(240, 120, 40), rgb(180, 60, 10))),
@@ -125,7 +132,7 @@ pub static ALL: &[Os] = &[
     os("ReactOS", &["reactos"], letter('R', rgb(80, 120, 220), rgb(30, 60, 150))),
     os("FreeDOS", &["freedos"], letter('F', rgb(60, 140, 90), rgb(25, 80, 50))),
     os("Android", &["android", "bliss", "primeos"], brand('\u{f17b}', rgb(80, 220, 140), rgb(20, 150, 90))),
-    os("ChromeOS", &["chromeos", "chromium os", "cloudready", "fydeos"], Icon { glyph: Glyph::Brand('\u{f268}'), top: rgb(255, 255, 255), bottom: rgb(220, 224, 230), ink: rgb(66, 133, 244) }),
+    os("ChromeOS", &["chromeos", "chromium os", "cloudready", "fydeos"], Icon { glyph: Glyph::Brand('\u{f268}'), top: rgb(255, 255, 255), bottom: rgb(220, 224, 230), ink: rgb(66, 133, 244), glow: None }),
     // ---- Servers & tools -------------------------------------------------------
     os("Proxmox VE", &["proxmox", "pve"], letter('P', rgb(230, 120, 30), rgb(160, 70, 0))),
     os("TrueNAS", &["truenas", "freenas"], letter('T', rgb(0, 150, 220), rgb(0, 80, 140))),
