@@ -417,7 +417,11 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
                 Some((o, false)) => (o.name.to_string(), o.icon),
                 None => ("Boot Loader".into(), os::DRIVE),
             };
-            found.push(vol.entry(title, fallback, icon, None, false));
+            let mut e = vol.entry(title, fallback, icon, None, false);
+            // Some distros (openSUSE cloud images) install only here, with
+            // the same grub.cfg stub a vendor folder would have.
+            e.grub_root = vol.read("\\EFI\\BOOT\\grub.cfg", 64 * 1024).and_then(|t| grub_stub_root(&t));
+            found.push(e);
         }
 
         volumes.push(vol);
@@ -628,6 +632,15 @@ fn unique_ids(entries: &mut [Entry]) {
     }
 }
 
+/// Whether a loader's title and an install's name are the same OS:
+/// equal, or one is the other plus an edition ("openSUSE" for "openSUSE
+/// Tumbleweed", identified from the loader's signing CA).
+fn same_os(loader: &str, install: &str) -> bool {
+    let (a, b) = (loader.to_lowercase(), install.to_lowercase());
+    let prefix = |short: &str, long: &str| long.strip_prefix(short).is_some_and(|rest| rest.starts_with(' '));
+    a == b || prefix(&a, &b) || prefix(&b, &a)
+}
+
 /// The UUID a distro's ESP `grub.cfg` stub searches for, e.g.
 /// `search.fs_uuid 0b9f... root` or `search --fs-uuid --set=dev 0b9f...`.
 fn grub_stub_root(text: &[u8]) -> Option<String> {
@@ -700,7 +713,7 @@ fn add_linux(entries: &mut Vec<Entry>) {
             .iter()
             .copied()
             .filter(|&i| entries[i].grub_root.is_none() || by_uuid.is_empty())
-            .filter(|&i| entries[i].title == inst.name || inst.os.is_some_and(|o| entries[i].title == o.name))
+            .filter(|&i| same_os(&entries[i].title, &inst.name) || inst.os.is_some_and(|o| entries[i].icon == o.icon))
             .collect();
         let loader = match (by_uuid.as_slice(), by_name.as_slice()) {
             ([one], _) => Some(*one),
