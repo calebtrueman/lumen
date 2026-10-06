@@ -737,6 +737,14 @@ function Get-DiagnosticReport {
         } catch { "Write test (own variable): FAILED: $($_.Exception.Message)" }
         "Lumen boot entry: $(if ($null -ne ($n = Find-LumenEntry)) { 'Boot{0:X4}' -f $n } else { 'none' })   LumenHealthy: $(Test-Healthy)"
     }
+    if ($Legacy) {
+        Add 'Legacy BIOS boot disk' {
+            $d = Get-BiosDisk
+            "Disk $($d.Number): $($d.FriendlyName), $([int]($d.Size / 1GB)) GB, $($d.PartitionStyle)"
+            Get-Partition -DiskNumber $d.Number | Select-Object PartitionNumber, Offset, @{n='SizeMB';e={[int]($_.Size / 1MB)}}, IsActive, Type | Format-Table | Out-String
+            if ($BiosDir) { "Lumen: $(Get-BiosStatus)" } else { 'Lumen BIOS tool: not available' }
+        }
+    }
     Add 'bcdedit /enum firmware' { bcdedit /enum firmware 2>&1 }
     Add 'EFI system partition' {
         Get-EspPartition | Select-Object DiskNumber, PartitionNumber, @{n='SizeMB';e={[int]($_.Size / 1MB)}}, Guid | Format-List | Out-String
