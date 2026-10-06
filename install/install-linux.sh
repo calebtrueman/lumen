@@ -6,6 +6,8 @@
 #
 # Options used by the one-click installer: --yes (don't ask), --code NNNN
 # (Secure Boot approval code), --result FILE (write key=value results).
+# --no-distro-keys: only ask to approve Lumen's own key, not the installed
+# distros' (then their kernels go through their own GRUB under Secure Boot).
 #
 # On PCs that start in legacy BIOS mode, Lumen's BIOS edition is installed
 # in the boot disk's MBR instead (see "legacy BIOS PCs" below).
@@ -32,12 +34,14 @@ YES=0
 CODE=""
 MODE=install
 RESULT=""
+DISTRO_KEYS=1
 
 while [ $# -gt 0 ]; do
     case $1 in
         --yes) YES=1 ;;
         --code) CODE=$2; shift ;;
         --uninstall) MODE=uninstall ;;
+        --no-distro-keys) DISTRO_KEYS=0 ;;
         --result) RESULT=$2; shift ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
@@ -165,7 +169,7 @@ if ! command -v efibootmgr >/dev/null; then
     command -v efibootmgr >/dev/null || die "efibootmgr is needed; please install it with your package manager and run this again"
 fi
 
-for f in lumen.efi "shim$S.efi" "mm$S.efi" lumen.cer lumen-heal.sh mok-request.sh; do
+for f in lumen.efi "shim$S.efi" "mm$S.efi" lumen.cer lumen-heal.sh mok-request.sh distro-keys.sh; do
     [ -f "$HERE/$f" ] || die "the installer is incomplete ($f is missing); please download it again"
 done
 
@@ -196,9 +200,10 @@ lumen_entry() {
 healthy() { [ -e "$EFIVARS/LumenHealthy-$VENDOR_GUID" ]; }
 sb_on() { od -An -t u1 "$EFIVARS/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c" 2>/dev/null | awk 'NF { v = $NF } END { exit !(v == 1) }'; }
 hexof() { od -An -tx1 -v "$1" | tr -d ' \n'; }
-key_enrolled() {
+key_enrolled() { approved "$HERE/lumen.cer"; }
+approved() { # cert: already in the approved keys (MokListRT)?
     f="$EFIVARS/MokListRT-$SHIM_GUID"
-    [ -e "$f" ] && hexof "$f" | grep -q "$(hexof "$HERE/lumen.cer")"
+    [ -e "$f" ] && hexof "$f" | grep -q "$(hexof "$1")"
 }
 
 # ---- uninstall -------------------------------------------------------------------
@@ -350,15 +355,31 @@ UNIT
 fi
 
 # Ask for the one-time Secure Boot approval even when Secure Boot is off, so
-# turning it on later doesn't stop Lumen from starting.
-if key_enrolled; then
+# turning it on later doesn't stop Lumen from starting. The installed
+# distros' own signing certificates (from their shims) go in the same
+# approval, so Lumen can start their kernels directly under Secure Boot.
+KEYS=$(mktemp -d)
+want=""
+approved "$HERE/lumen.cer" || want="$HERE/lumen.cer"
+DISTROS=""
+if [ "$DISTRO_KEYS" -eq 1 ]; then
+    . "$HERE/distro-keys.sh"
+    DISTROS=$(distro_keys "$ESP" "$KEYS" 2>/dev/null || true)
+    for k in "$KEYS"/*.der; do
+        [ -f "$k" ] && ! approved "$k" && want="$want $k"
+    done
+fi
+if [ -z "$want" ]; then
     result "mok=enrolled"
 else
     if [ -z "$CODE" ]; then CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }'); fi
-    LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" "$HERE/lumen.cer" >/dev/null || die "couldn't queue the Secure Boot key"
+    # shellcheck disable=SC2086
+    LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" $want >/dev/null || die "couldn't queue the Secure Boot key"
     result "mok=queued"
     result "code=$CODE"
+    [ -n "$DISTROS" ] && [ "$want" != "$HERE/lumen.cer" ] && result "distros=$DISTROS"
 fi
+rm -rf "$KEYS"
 sb_on && result "secureboot=1" || result "secureboot=0"
 
 DONE=1

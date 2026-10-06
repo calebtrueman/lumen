@@ -50,6 +50,9 @@ def main():
     expect = args[args.index("--expect") + 1] if "--expect" in args else None
     shot = args[args.index("--shot") + 1] if "--shot" in args else None
     refusal = "--expect-refusal" in args
+    # --approve=DIR: nothing enrolled yet; DIR holds MokNew/MokAuth as the
+    # installers write them (password 1234), approved on shim's blue screen.
+    request = next((a.split("=", 1)[1] for a in args if a.startswith("--approve=")), None)
     fallback = "--expect-fallback" in args
 
     shutil.rmtree(OUT, ignore_errors=True)
@@ -59,10 +62,17 @@ def main():
         shutil.copy(f"{DIST}/shimx64.efi", f"{esp}/BOOTX64.EFI")
         shutil.copy(f"{DIST}/mmx64.efi", f"{esp}/mmx64.efi")
         shutil.copy(f"{DIST}/lumen.efi", f"{esp}/grubx64.efi")
-        subprocess.check_call([VFV, "--input", f"{SHARE}/edk2-i386-vars.fd", "--output", f"{OUT}/vars.fd",
-                               "--enroll-microsoft", "--microsoft-db", "all", "--sb",
-                               "--add-mok", "605dab50-e046-4300-abb6-3dd810dd8b23", f"{DIST}/lumen.cer"],
-                              stdout=subprocess.DEVNULL)
+        vfv = [VFV, "--input", f"{SHARE}/edk2-i386-vars.fd", "--output", f"{OUT}/vars.fd",
+               "--enroll-microsoft", "--microsoft-db", "all", "--sb"]
+        if request:
+            vfv += request_cmd(request)
+        else:
+            vfv += ["--add-mok", "605dab50-e046-4300-abb6-3dd810dd8b23", f"{DIST}/lumen.cer"]
+            # Distro CAs approved alongside Lumen's key (as the installers offer).
+            for a in args:
+                if a.startswith("--extra-mok="):
+                    vfv += ["--add-mok", "605dab50-e046-4300-abb6-3dd810dd8b23", a.split("=", 1)[1]]
+        subprocess.check_call(vfv, stdout=subprocess.DEVNULL)
     else:
         shutil.copy(LUMEN, f"{esp}/BOOTX64.EFI")
         shutil.copy(f"{SHARE}/edk2-i386-vars.fd", f"{OUT}/vars.fd")
@@ -86,6 +96,18 @@ def main():
         "-monitor", f"unix:{OUT}/mon.sock,server,nowait",
     ]
     q = subprocess.Popen(cmd)
+    if request:
+        time.sleep(1)
+        ms = socket.socket(socket.AF_UNIX)
+        ms.connect(f"{OUT}/mon.sock")
+        send = lambda c: ms.sendall((c + "\n").encode())
+
+        def mok_shot(n):
+            send(f"screendump {OUT}/{n}.ppm")
+            time.sleep(1.5)
+            ppm_to_png(f"{OUT}/{n}.ppm", f"{OUT}/{n}.png")
+        approve(send, mok_shot)
+        ms.close()
     ok, why = False, "timed out"
     try:
         deadline = time.time() + 900
@@ -144,6 +166,26 @@ def main():
         ok, why = False, f"install not named {expect!r}"
     print(("PASS" if ok else "FAIL") + ": " + why)
     sys.exit(0 if ok else 1)
+
+
+def request_cmd(d):
+    import json
+    guid = "605dab50-e046-4300-abb6-3dd810dd8b23"
+    var = lambda n: {"name": n, "guid": guid, "attr": 7, "data": open(f"{d}/{n}-{guid}", "rb").read()[4:].hex()}
+    json.dump({"version": 2, "variables": [var("MokNew"), var("MokAuth")]}, open(f"{OUT}/mok.json", "w"))
+    return ["--set-json", f"{OUT}/mok.json"]
+
+
+def approve(mon_send, shot):
+    """Shim's MokManager: any key, Enroll MOK, Continue, Yes, password, Reboot."""
+    steps = [(8, ["ret"]), (3, ["down", "ret"]), (3, ["down", "down", "down", "down", "down", "ret"]),
+             (3, ["down", "ret"]), (3, ["1", "2", "3", "4", "ret"]), (4, ["ret"])]
+    for i, (wait, keys) in enumerate(steps):
+        time.sleep(wait)
+        shot(f"mok_{i}")
+        for k in keys:
+            mon_send(f"sendkey {k}")
+            time.sleep(0.4)
 
 
 def read(p):

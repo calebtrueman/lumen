@@ -69,7 +69,7 @@ fi
 osslsigncode sign -h sha256 -certs "$KEYS/lumen.crt" -key "$KEYS/lumen.key" "$@" \
     -in "$EFI" -out "$OUT/lumen.efi" >/dev/null
 cp "vendor/shim/$ARCH/shim$S.efi" "vendor/shim/$ARCH/mm$S.efi" "$KEYS/lumen.cer" "$OUT/"
-cp install/install-linux.sh install/lumen-heal.sh install/mok-request.sh install/lumen-windows.ps1 install/lumen.conf "$OUT/"
+cp install/install-linux.sh install/lumen-heal.sh install/mok-request.sh install/distro-keys.sh install/lumen-windows.ps1 install/lumen.conf "$OUT/"
 if [ "$ARCH" = x86_64 ]; then
     # Lumen for PCs that start in legacy BIOS mode, and the tool the
     # installers use to put it in the MBR (static Linux and Windows builds;

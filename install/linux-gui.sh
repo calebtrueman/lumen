@@ -125,8 +125,9 @@ if ! grep -q '^ok=1' "$TMP/result" 2>/dev/null; then
 Any changes were undone, so your PC starts as before."
 fi
 
+distros=$(sed -n 's/^distros=//p' "$TMP/result")
 if grep -q '^mok=queued' "$TMP/result"; then
-    info "One last step" "Restart your PC. A blue screen titled \"Shim UEFI key management\" appears once:
+    info "One last step" "Restart your PC. A blue screen titled \"Shim UEFI key management\" appears once${distros:+ (it approves Lumen and the signing keys of $distros, so Lumen can start them directly)}:
 
   1.  Press any key
   2.  Choose Enroll MOK, then Continue, then Yes
