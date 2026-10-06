@@ -8,4 +8,4 @@ target = "x86_64-unknown-uefi"
 # hardware); this target uses SSE2. See targets/x86_64-lumen-uefi.json and
 # the entry stub in src/main.rs, which makes sure SSE is switched on first.
 [alias]
-efi-x64 = ["build", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc,compiler_builtins", "-Zbuild-std-features=compiler-builtins-mem", "--target", "targets/x86_64-lumen-uefi.json"]
+efi-x64 = ["build", "-p", "lumen", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc,compiler_builtins", "-Zbuild-std-features=compiler-builtins-mem", "--target", "targets/x86_64-lumen-uefi.json"]

@@ -52,7 +52,7 @@ if [ "$ARCH" = x86_64 ]; then
     cargo efi-x64
     EFI=target/x86_64-lumen-uefi/release/lumen.efi
 else
-    cargo build --release --target "$ARCH-unknown-uefi"
+    cargo build -p lumen --release --target "$ARCH-unknown-uefi"
     EFI=target/$ARCH-unknown-uefi/release/lumen.efi
 fi
 

@@ -6,15 +6,11 @@
 extern crate alloc;
 
 mod clock;
-mod config;
 mod discover;
-mod gfx;
-mod icons;
 mod launch;
 mod mouse;
-mod os;
-mod text;
-mod ui;
+
+pub use lumen_core::{config, gfx, icons, os, text, ui};
 
 use alloc::format;
 use alloc::string::String;
@@ -62,7 +58,7 @@ core::arch::global_asm!(
 /// revoked without revoking the signing key.
 #[used]
 #[unsafe(link_section = ".sbat")]
-static SBAT: [u8; include_bytes!("../sbat.csv").len()] = *include_bytes!("../sbat.csv");
+static SBAT: [u8; include_bytes!("../../../sbat.csv").len()] = *include_bytes!("../../../sbat.csv");
 
 /// Referenced by the toolchain for UCS-2 strings on UEFI but not provided
 /// by `compiler_builtins` for this target.
@@ -278,6 +274,49 @@ fn describe(status: Status) -> &'static str {
 
 /// Boots an entry, falling back to the firmware's own boot entry if direct
 /// chainloading fails. Returns an error message if nothing worked.
+/// What the menu shows for each entry (same order as `entries`).
+fn cards(entries: &[Entry]) -> Vec<ui::Card> {
+    entries
+        .iter()
+        .map(|e| ui::Card {
+            id: e.id.clone(),
+            title: e.title.clone(),
+            location: e.location.clone(),
+            detail: match &e.options {
+                Some(o) => format!("{}  {}", e.file, o),
+                None => e.file.clone(),
+            },
+            icon: e.icon,
+        })
+        .collect()
+}
+
+fn map_key(key: uefi::proto::console::text::Key) -> Option<lumen_core::input::Key> {
+    use lumen_core::input::Key as K;
+    use uefi::proto::console::text::{Key, ScanCode};
+    Some(match key {
+        Key::Special(ScanCode::LEFT) => K::Left,
+        Key::Special(ScanCode::RIGHT) => K::Right,
+        Key::Special(ScanCode::UP) => K::Up,
+        Key::Special(ScanCode::DOWN) => K::Down,
+        Key::Special(ScanCode::HOME) => K::Home,
+        Key::Special(ScanCode::END) => K::End,
+        Key::Special(ScanCode::FUNCTION_5) => K::F5,
+        Key::Special(ScanCode::ESCAPE) => K::Escape,
+        Key::Printable(c) => match char::from(c) {
+            '\r' | '\n' => K::Enter,
+            '\t' => K::Tab,
+            c => K::Char(c),
+        },
+        _ => return None,
+    })
+}
+
+fn wall_clock() -> Option<ui::WallTime> {
+    let t = uefi::runtime::get_time().ok()?;
+    Some(ui::WallTime { year: t.year(), month: t.month(), day: t.day(), hour: t.hour(), minute: t.minute() })
+}
+
 fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
     log::info!("starting {:?} ({})", entry.title, entry.file);
     launch::remember(entry);
@@ -355,7 +394,9 @@ fn main() -> Status {
     }
 
     let mut text = text::Text::new();
-    let mut ui = ui::Ui::new(entries, sel, launch::firmware_setup_supported(), clock::now());
+    let mut ui = ui::Ui::new(cards(&entries), sel, launch::firmware_setup_supported(), clock::now());
+    let mut entries = entries;
+    ui.wall_clock = wall_clock;
     ui.show_clock = cfg.clock;
     ui.set_auto_start(if timeout > 0 { timeout } else { -1 });
     if timeout > 0 && !key_held {
@@ -380,6 +421,7 @@ fn main() -> Status {
 
         let mut command = ui::Command::None;
         while let Some(key) = system::with_stdin(|i| i.read_key().ok().flatten()) {
+            let Some(key) = map_key(key) else { continue };
             command = ui.key(key);
             if !matches!(command, ui::Command::None) {
                 break;
@@ -413,7 +455,7 @@ fn main() -> Status {
         match command {
             ui::Command::None => {}
             ui::Command::Boot(i) => {
-                let err = boot_entry(&mut display, &ui.entries[i], &cfg);
+                let err = boot_entry(&mut display, &entries[i], &cfg);
                 display.sync_mode();
                 let _ = system::with_stdout(|o| o.enable_cursor(false));
                 if !err.is_empty() {
@@ -447,8 +489,8 @@ fn main() -> Status {
             }
             ui::Command::Rescan => {
                 discover::connect_all();
-                let entries = discover::scan(&me, &cfg);
-                let fresh = ui.set_entries(entries, clock::now());
+                entries = discover::scan(&me, &cfg);
+                let fresh = ui.set_entries(cards(&entries), clock::now());
                 match fresh.as_slice() {
                     [] => {}
                     [one] => ui.notify(format!("Found {one}"), clock::now()),

@@ -1,17 +1,6 @@
-//! Host-side gallery of every OS tile, built from Lumen's own source files.
+//! Host-side gallery of every OS tile, drawn by Lumen's own renderer.
 
-#![allow(dead_code)]
-
-extern crate alloc;
-
-#[path = "../../../src/gfx.rs"]
-mod gfx;
-#[path = "../../../src/icons.rs"]
-mod icons;
-#[path = "../../../src/os.rs"]
-mod os;
-#[path = "../../../src/text.rs"]
-mod text;
+use lumen_core::{gfx, icons, os, text};
 
 use std::io::Write;
 

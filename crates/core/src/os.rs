@@ -37,7 +37,7 @@ pub const WINDOWS: Icon = Icon { glyph: Glyph::Windows, top: rgb(0, 164, 239), b
 /// Tux by Larry Ewing (lewing@isc.tamu.edu) and The GIMP; SVG by Simon Budig
 /// and Garrett LeSage. Rendered to 216x256 premultiplied RGBA.
 pub static TUX_IMAGE: crate::gfx::Sprite =
-    crate::gfx::Sprite { w: 216, h: 256, rgba: include_bytes!("../assets/tux.rgba") };
+    crate::gfx::Sprite { w: 216, h: 256, rgba: include_bytes!("../../../assets/tux.rgba") };
 
 /// Full-colour Tux on a dark slate tile, glowing in his beak-and-feet yellow.
 pub const LINUX: Icon =

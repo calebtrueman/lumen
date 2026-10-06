@@ -5,10 +5,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use fontdue::{Font, FontSettings, Metrics};
 
-static BODY_TTF: &[u8] = include_bytes!("../assets/Inter-Medium.ttf");
-static DISPLAY_TTF: &[u8] = include_bytes!("../assets/InterDisplay-SemiBold.ttf");
-static LOGOS_TTF: &[u8] = include_bytes!("../assets/logos.ttf");
-static BRANDS_OTF: &[u8] = include_bytes!("../assets/brands.otf");
+static BODY_TTF: &[u8] = include_bytes!("../../../assets/Inter-Medium.ttf");
+static DISPLAY_TTF: &[u8] = include_bytes!("../../../assets/InterDisplay-SemiBold.ttf");
+static LOGOS_TTF: &[u8] = include_bytes!("../../../assets/logos.ttf");
+static BRANDS_OTF: &[u8] = include_bytes!("../../../assets/brands.otf");
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Face {

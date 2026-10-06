@@ -9,7 +9,7 @@ publish = false
 #   cargo run --release --manifest-path tools/gallery/Cargo.toml -- out.ppm
 
 [dependencies]
-fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
+lumen-core = { path = "../../crates/core" }
 libm = "0.2.16"
 
 [workspace]

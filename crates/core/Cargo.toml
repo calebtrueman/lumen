@@ -1,0 +1,11 @@
+[package]
+name = "lumen-core"
+description = "Platform-independent parts of Lumen: UI, rendering, OS knowledge, file systems, Linux boot logic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
+libm = "0.2.16"
+log = "0.4.34"

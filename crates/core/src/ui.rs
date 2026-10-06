@@ -1,6 +1,6 @@
 //! Picker state, layout, animation and input.
 
-use crate::discover::Entry;
+use crate::input::Key;
 use crate::gfx::*;
 use crate::icons;
 use crate::text::{Face, Text};
@@ -8,7 +8,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use libm::expf;
-use uefi::proto::console::text::{Key, ScanCode};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Action {
@@ -47,8 +46,34 @@ enum Row {
     Actions,
 }
 
+/// What the menu shows for one bootable thing. The platform keeps its own
+/// list of how to start each one, in the same order.
+#[derive(Clone)]
+pub struct Card {
+    /// Stable identity across rescans (keeps selection and animations).
+    pub id: String,
+    pub title: String,
+    /// Where it lives, e.g. "EFI system partition · Partition 1".
+    pub location: String,
+    /// The small print under the location: loader path, options.
+    pub detail: String,
+    pub icon: icons::Icon,
+}
+
+/// Wall-clock time as the firmware reports it.
+#[derive(Clone, Copy)]
+pub struct WallTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+}
+
 pub struct Ui {
-    pub entries: Vec<Entry>,
+    pub entries: Vec<Card>,
+    /// Reads the real-time clock (None if it can't be read).
+    pub wall_clock: fn() -> Option<WallTime>,
     actions: Vec<Action>,
     sel: usize,
     act_sel: usize,
@@ -74,7 +99,7 @@ pub struct Ui {
 const ANIM_RATE: f32 = 14.0;
 
 impl Ui {
-    pub fn new(entries: Vec<Entry>, sel: usize, firmware_setup: bool, now: f64) -> Self {
+    pub fn new(entries: Vec<Card>, sel: usize, firmware_setup: bool, now: f64) -> Self {
         let mut actions = Vec::new();
         actions.push(Action::AutoStart);
         if firmware_setup {
@@ -102,13 +127,14 @@ impl Ui {
             hits: Vec::new(),
             cursor: None,
             auto_start: -1,
+            wall_clock: || None,
         }
     }
 
     /// Replace the entry list after a rescan. Cards that were already
     /// shown keep their state; only new ones animate in, and the selection
     /// stays on the same OS. Returns the titles of newly found entries.
-    pub fn set_entries(&mut self, entries: Vec<Entry>, now: f64) -> Vec<String> {
+    pub fn set_entries(&mut self, entries: Vec<Card>, now: f64) -> Vec<String> {
         let old = |id: &str| self.entries.iter().position(|e| e.id == id);
         let selected = self.entries.get(self.sel).map(|e| e.id.clone());
         let mut fresh = Vec::new();
@@ -212,35 +238,35 @@ impl Ui {
         self.redraw = true;
         let n = self.entries.len();
         match key {
-            Key::Special(ScanCode::LEFT) => match self.row {
+            Key::Left => match self.row {
                 Row::Entries => self.sel = self.sel.saturating_sub(1),
                 Row::Actions => self.act_sel = self.act_sel.saturating_sub(1),
             },
-            Key::Special(ScanCode::RIGHT) => match self.row {
+            Key::Right => match self.row {
                 Row::Entries => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
                 Row::Actions => self.act_sel = (self.act_sel + 1).min(self.actions.len() - 1),
             },
-            Key::Special(ScanCode::HOME) if self.row == Row::Entries => self.sel = 0,
-            Key::Special(ScanCode::END) if self.row == Row::Entries => self.sel = n.saturating_sub(1),
-            Key::Special(ScanCode::UP) if n > 0 => self.row = Row::Entries,
-            Key::Special(ScanCode::DOWN) => self.row = Row::Actions,
-            Key::Special(ScanCode::FUNCTION_5) => return Command::Rescan,
-            Key::Special(ScanCode::ESCAPE) => {
+            Key::Home if self.row == Row::Entries => self.sel = 0,
+            Key::End if self.row == Row::Entries => self.sel = n.saturating_sub(1),
+            Key::Up if n > 0 => self.row = Row::Entries,
+            Key::Down => self.row = Row::Actions,
+            Key::F5 => return Command::Rescan,
+            Key::Escape => {
                 if !had_countdown {
                     self.row = Row::Entries;
                 }
             }
-            Key::Printable(c) => match char::from(c) {
-                '\r' | '\n' | ' ' => {
-                    return match self.row {
-                        Row::Entries if n > 0 => Command::Boot(self.sel),
-                        Row::Actions => Command::Act(self.actions[self.act_sel]),
-                        _ => Command::None,
-                    };
-                }
-                '\t' => {
-                    self.row = if self.row == Row::Entries || n == 0 { Row::Actions } else { Row::Entries };
-                }
+            Key::Enter | Key::Char(' ') => {
+                return match self.row {
+                    Row::Entries if n > 0 => Command::Boot(self.sel),
+                    Row::Actions => Command::Act(self.actions[self.act_sel]),
+                    _ => Command::None,
+                };
+            }
+            Key::Tab => {
+                self.row = if self.row == Row::Entries || n == 0 { Row::Actions } else { Row::Entries };
+            }
+            Key::Char(c) => match c {
                 d @ '1'..='9' => {
                     let i = d as usize - '1' as usize;
                     if i < n {
@@ -281,7 +307,7 @@ impl Ui {
         }
         if now - self.clock.2 >= 1.0 {
             let prev = self.clock.0.clone();
-            self.clock = clock_strings(now);
+            self.clock = clock_strings((self.wall_clock)(), now);
             moving |= self.show_clock && prev != self.clock.0;
         }
         moving
@@ -361,11 +387,7 @@ impl Ui {
             let a = clamp01(self.focus[self.sel] * 1.4 - 0.4) * layout[self.sel].2;
             let dy = row_y + ch / 2.0 + 64.0 * s;
             text.draw_centered(cv, Face::Body, 16.0 * s, &e.location, w / 2.0, dy, white, 0.62 * a);
-            let file = match &e.options {
-                Some(o) => format!("{}  {}", e.file, o),
-                None => e.file.clone(),
-            };
-            let file = text.fit(Face::Body, 13.0 * s, &file, w * 0.6);
+            let file = text.fit(Face::Body, 13.0 * s, &e.detail, w * 0.6);
             text.draw_centered(cv, Face::Body, 13.0 * s, &file, w / 2.0, dy + 24.0 * s, white, 0.34 * a);
 
             if let Some((start, len)) = self.countdown {
@@ -515,23 +537,23 @@ fn ease_out(t: f32) -> f32 {
     1.0 - u * u * u
 }
 
-fn clock_strings(now: f64) -> (String, String, f64) {
+fn clock_strings(time: Option<WallTime>, now: f64) -> (String, String, f64) {
     const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     const MONTHS: [&str; 12] =
         ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    match uefi::runtime::get_time() {
-        Ok(t) => {
-            let (y, m, d) = (t.year() as i32, t.month() as usize, t.day() as i32);
+    match time {
+        Some(t) if (1..=12).contains(&t.month) => {
+            let (y, m, d) = (t.year as i32, t.month as usize, t.day as i32);
             // Sakamoto's day-of-week.
             const OFF: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
             let yy = if m < 3 { y - 1 } else { y };
             let dow = (yy + yy / 4 - yy / 100 + yy / 400 + OFF[(m - 1) % 12] + d).rem_euclid(7) as usize;
             (
-                format!("{:02}:{:02}", t.hour(), t.minute()),
+                format!("{:02}:{:02}", t.hour, t.minute),
                 format!("{}, {} {}", DAYS[dow], MONTHS[(m - 1) % 12], d),
                 now,
             )
         }
-        Err(_) => (String::new(), String::new(), now),
+        _ => (String::new(), String::new(), now),
     }
 }

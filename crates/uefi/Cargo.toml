@@ -1,0 +1,20 @@
+[package]
+name = "lumen"
+description = "Lumen for UEFI PCs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumen-core = { path = "../core" }
+libm = "0.2.16"
+log = "0.4.34"
+uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "logger"] }
+
+[features]
+# Send log output to the QEMU debug console (I/O port 0xE9). Testing only.
+debugcon = ["uefi/log-debugcon"]
+
+[dev-dependencies]
+log = "0.4.34"
+uefi-raw = "0.17"
