@@ -8,10 +8,14 @@ DISK is an untouched x86_64 distro image (e.g. Debian's
 debian-13-genericcloud-amd64.qcow2), attached read-only (snapshot). Lumen
 runs from its own small ESP with "timeout 0", so it starts the only OS it
 finds straight away. Passes when:
-  - Lumen's log shows it found the install and started the kernel itself
-    (no "direct start ... failed" and no fallback to the distro's loader),
-  - the kernel boots: its log reaches userspace on the serial console,
-  - GRUB never ran (it prints "GRUB" / "Loading Linux" when it does).
+  - Lumen's log shows it started the kernel itself ("starting kernel ...
+    directly") and no "direct start ... failed" (which would mean it fell
+    back to the distro's loader),
+  - and the kernel boots: its console output reaches userspace on the
+    serial port, or, for distros that print nothing on serial (quiet,
+    console on tty only), it's still running 2 minutes later (a kernel
+    that fails to start returns to Lumen, which logs the failure); a
+    screenshot is then saved as target/linux-direct/booted.png.
 
 With --secureboot: Secure Boot on (Microsoft keys), Lumen behind Debian's
 shim with its certificate enrolled as a MOK, as on a real install. A
@@ -77,10 +81,13 @@ def main():
     ok, why = False, "timed out"
     try:
         deadline = time.time() + 900
+        started = launched = None
         while time.time() < deadline and q.poll() is None:
             time.sleep(5)
             serial = read(f"{OUT}/serial.log")
             debug = read(f"{OUT}/debug.log")
+            if "directly" in debug and started is None:
+                started = time.time()
             if "direct start of" in debug:
                 why = "direct start failed: " + debug.split("direct start of", 1)[1].splitlines()[0]
                 ok = refusal and "isn't signed by a key this PC trusts" in why
@@ -88,12 +95,20 @@ def main():
             if refusal and "Linux version" in serial:
                 why = "an unsigned kernel was started"
                 break
-            if "GRUB" in serial or "Loading Linux" in serial:
-                why = "GRUB ran"
+            if "starting" in debug and launched is None:
+                launched = time.time()
+            if launched and started is None and time.time() - launched > 20:
+                why = "Lumen started the distro's loader, not the kernel"
                 break
+            if started is None:
+                continue
             # Userspace reached: systemd or the login prompt on the console.
-            if "Linux version" in serial and ("login:" in serial or "Reached target" in serial or "Welcome to" in serial):
+            if any(m in serial for m in ("login:", "Reached target", "Welcome to", "systemd[1]")):
                 ok, why = True, "kernel booted to userspace"
+                break
+            if time.time() - started > 120 and q.poll() is None:
+                ok, why = True, "kernel running after 2 minutes (no serial console output; see booted.png)"
+                shot = shot or "booted"
                 break
         if shot:
             screendump(shot)

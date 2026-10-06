@@ -337,6 +337,7 @@ fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
     }
     let _ = system::with_stdout(|o| o.clear());
     if let Some(target) = &entry.linux {
+        log::info!("starting kernel {} directly", target.kernel);
         let why = linux_boot::boot(target);
         log::info!("direct start of {:?} failed: {why}", entry.title);
         if !entry.has_loader {
