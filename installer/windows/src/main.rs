@@ -53,7 +53,20 @@ fn main() {
         }
     }
     args.push(if quiet { "-Yes" } else { "-Gui" }.into());
-    let status = Command::new(&powershell).args(&args).creation_flags(CREATE_NO_WINDOW).status();
+    let mut cmd = Command::new(&powershell);
+    cmd.args(&args).creation_flags(CREATE_NO_WINDOW);
+    if quiet {
+        // Keep PowerShell's own output (including script errors) for silent
+        // installs, which otherwise leave no trace when something fails.
+        let dir = PathBuf::from(env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into())).join("Lumen");
+        let _ = fs::create_dir_all(&dir);
+        if let Ok(f) = fs::File::create(dir.join("installer-output.log")) {
+            if let Ok(f2) = f.try_clone() {
+                cmd.stdout(f).stderr(f2);
+            }
+        }
+    }
+    let status = cmd.status();
     let _ = fs::remove_dir_all(&dir);
     match status {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),

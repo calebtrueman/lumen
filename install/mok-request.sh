@@ -27,7 +27,14 @@ n=$(wc -c < "$CER")
 } > "$T/new"
 { cat "$T/new"; printf '%s' "$pw" | iconv -f UTF-8 -t UTF-16LE; } | openssl dgst -sha256 -binary > "$T/auth"
 
-for v in MokNew MokAuth; do chattr -i "$V/$v-$G" 2>/dev/null || true; done
-{ printf '\007\000\000\000'; cat "$T/new"; } > "$V/MokNew-$G"
-{ printf '\007\000\000\000'; cat "$T/auth"; } > "$V/MokAuth-$G"
+# efivarfs needs each variable written in a single write() of
+# attributes + data, so assemble it first and copy it in one go.
+put_var() { # name datafile
+    { printf '\007\000\000\000'; cat "$2"; } > "$T/$1.var"
+    chattr -i "$V/$1-$G" 2>/dev/null || true
+    dd if="$T/$1.var" of="$V/$1-$G" bs="$(wc -c < "$T/$1.var")" count=1 2>/dev/null ||
+        { echo "couldn't write $1" >&2; exit 1; }
+}
+put_var MokNew "$T/new"
+put_var MokAuth "$T/auth"
 echo "Enrollment request queued."

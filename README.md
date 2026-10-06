@@ -40,7 +40,8 @@ inside Linux the way GRUB does. It uses several independent sources:
    5. the distro's signing certificate embedded in its shim
 
    So an Ubuntu, Fedora, Debian, Arch, openSUSE or Mint stick shows up by
-   name, even with a blank label.
+   name, even with a blank label. A stick is always **one** card, even when
+   it also carries its base distro's folder (Bazzite's has `\EFI\fedora`).
 
 ![A Debian live USB plugged in while the menu is open appears as a new card](docs/screenshots/usb.png)
 
@@ -82,7 +83,7 @@ tools/gallery/Cargo.toml -- gallery.ppm`.
 | ← → / mouse hover / scroll wheel | choose |
 | Enter, Space, click | start |
 | 1–9 | start that entry immediately |
-| Tab, ↓ / ↑ | OS row ↔ Firmware Settings / Restart / Shut Down |
+| Tab, ↓ / ↑ | OS row ↔ Auto-start / Firmware Settings / Restart / Shut Down |
 | Esc / any key / moving the mouse | stop the countdown |
 | F5 | rescan (rarely needed: new USB sticks are detected automatically) |
 
@@ -92,7 +93,11 @@ tools/gallery/Cargo.toml -- gallery.ppm`.
 
 Mice and touchpads (relative pointers) and touchscreens/tablets (absolute
 pointers) all work, as long as the firmware has a driver for them, which
-nearly all PC firmware does. Lumen highlights whatever you booted last time.
+nearly all PC firmware does. Lumen highlights whatever you booted last time and **waits until you
+choose**. To start it automatically, press the **Auto-start** button in the
+bottom row: it cycles Off → 5 s → 10 s → 30 s, and the choice is saved in the
+PC's firmware (it survives reinstalls and overrides `timeout` in
+`lumen.conf`).
 
 ## Secure Boot
 
@@ -112,7 +117,12 @@ the next boot a blue *Shim UEFI key management* screen appears:
 3. Type the one-time password you chose during install.
 4. Reboot.
 
-After that, Lumen starts automatically with Secure Boot fully on.
+After that, Lumen starts automatically with Secure Boot fully on. The
+installers ask for this approval **even when Secure Boot is off**, so turning
+it on later doesn't stop Lumen from starting. If Secure Boot is ever on
+without the approval (a BIOS reset can wipe it), the repair tasks step Lumen
+aside so the PC starts Windows/Linux directly instead of stopping at shim's
+error screen; re-running the installer brings Lumen back.
 
 | One-time key approval (shim's MokManager) | A loader Secure Boot refuses |
 | --- | --- |
@@ -250,12 +260,13 @@ key; never install those on a real PC.
 `\EFI\lumen\lumen.conf`:
 
 ```
-timeout 5            # 0 = boot default immediately, -1 = wait forever
+timeout 10           # auto-start after N s (default: wait; 0 = immediately); the Auto-start button overrides it
 default last         # or part of a title, e.g. "Windows"
 hide Recovery        # hide matching entries
 bootnext Windows     # start via firmware entry + reboot (BitLocker-safe)
 resolution keep      # keep | max | 1920x1080
 clock off
+debug on             # on-screen frame timing, for performance reports
 entry Arch (fallback) | \EFI\Linux\arch-linux.efi | initrd=\initramfs-linux-fallback.img
 ```
 
