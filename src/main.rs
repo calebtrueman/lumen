@@ -290,6 +290,9 @@ fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
         return format!("Couldn't start {}: firmware refused ({status:?})", entry.title);
     }
 
+    if cfg.stay_default {
+        launch::arm_return_to_lumen();
+    }
     let _ = system::with_stdout(|o| o.clear());
     match launch::start(entry) {
         // The loader ran and came back (e.g. the user left the UEFI shell).

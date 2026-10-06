@@ -143,16 +143,36 @@ fn boot_description(num: u16) -> Option<String> {
     Some(String::from_utf16_lossy(&units))
 }
 
+/// Our own firmware entry, if this run was started from it.
+fn own_entry() -> Option<u16> {
+    let (cur, _) = runtime::get_variable_boxed(cstr16!("BootCurrent"), &VariableVendor::GLOBAL_VARIABLE).ok()?;
+    let cur = cur.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]))?;
+    boot_description(cur).is_some_and(|d| d.trim().eq_ignore_ascii_case("lumen")).then_some(cur)
+}
+
+/// Before starting an OS, make Lumen the firmware's one-shot "next boot".
+///
+/// Distro installers and GRUB updates (`grub-install`), and sometimes
+/// Windows updates, move their own entry to the front of BootOrder while
+/// that OS is running. They don't touch BootNext, so the next start still
+/// lands in Lumen, which then moves itself back to first place
+/// (`heal_boot_order`). Only done when we were started from our own entry.
+pub fn arm_return_to_lumen() {
+    let Some(num) = own_entry() else { return };
+    let attrs = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS;
+    if runtime::set_variable(cstr16!("BootNext"), &VariableVendor::GLOBAL_VARIABLE, attrs, &num.to_le_bytes()).is_ok() {
+        log::info!("BootNext set to Boot{num:04X} (Lumen) so the next start returns here");
+    }
+}
+
 /// If we were started from our own firmware entry but something (a Windows
 /// update, `grub-install`, a firmware reset) moved another entry in front
 /// of it, put Lumen back first. Never touches anything else.
 pub fn heal_boot_order() {
-    let Ok((cur, _)) = runtime::get_variable_boxed(cstr16!("BootCurrent"), &VariableVendor::GLOBAL_VARIABLE) else { return };
-    let Some(cur) = cur.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]])) else { return };
-    if !boot_description(cur).is_some_and(|d| d.trim().eq_ignore_ascii_case("lumen")) {
-        return; // started some other way (USB, F12 menu entry we don't own)
-    }
+    // Started some other way (USB, an entry we don't own)? Leave it alone.
+    let Some(cur) = own_entry() else { return };
     let mut order = boot_order();
+    log::info!("started from Boot{cur:04X} (Lumen); BootOrder starts with {:04X?}", order.first());
     if order.first() == Some(&cur) {
         return;
     }

@@ -113,6 +113,8 @@ def stage():
             f.write(f"{sys.argv[i + 1]} {sys.argv[i + 2]}")
     if "--heal-test" in sys.argv:
         open(os.path.join(OUT, "disk0", "heal-test"), "w").close()
+    if "--grub-takeover" in sys.argv:
+        open(os.path.join(OUT, "disk0", "grub-takeover"), "w").close()
 
     shutil.copy(os.path.join(SHARE, "edk2-i386-vars.fd"), os.path.join(OUT, "vars.fd"))
 
@@ -174,7 +176,7 @@ def main():
             time.sleep(0.3)
         it = iter(args)
         for a in it:
-            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test", "--demo", "--sb-off", "--reuse", "--enable-sb"):
+            if a.startswith("--mok=") or a in ("--secureboot", "--headless", "--heal-test", "--demo", "--sb-off", "--reuse", "--enable-sb", "--grub-takeover"):
                 continue
             if a == "--mouse-test":
                 next(it), next(it)

@@ -32,7 +32,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.3.0'
+$Version = '0.3.1'
 $Data = Join-Path $env:ProgramData 'Lumen'
 $LogFile = Join-Path $Data 'install.log'
 $TaskName = 'Lumen boot order'

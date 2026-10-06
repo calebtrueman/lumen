@@ -8,6 +8,7 @@
 //! hide Recovery          # hide entries whose title or path contains this
 //! resolution max         # "keep", "max" or WIDTHxHEIGHT
 //! clock off              # hide the clock
+//! stay-default off       # don't guard Lumen's place as the default (see README)
 //! bootnext Windows       # start matching entries via the firmware's own
 //!                        # boot entry + reboot (BitLocker-safe)
 //! entry Arch (fallback) | \EFI\arch\vmlinuz-linux.efi | initrd=\initramfs-linux-fallback.img
@@ -36,6 +37,10 @@ pub struct Config {
     pub clock: bool,
     /// On-screen frame timing (`debug on`).
     pub debug: bool,
+    /// Make the next start return to Lumen whenever it starts an OS, so
+    /// installers and updates that reorder the boot entries can't take over
+    /// (`stay-default off` to disable).
+    pub stay_default: bool,
     pub bootnext: Vec<String>,
     pub entries: Vec<CustomEntry>,
 }
@@ -49,6 +54,7 @@ impl Default for Config {
             resolution: Resolution::Keep,
             clock: true,
             debug: false,
+            stay_default: true,
             bootnext: Vec::new(),
             entries: Vec::new(),
         }
@@ -69,6 +75,7 @@ impl Config {
                 "default" => cfg.default = val.to_string(),
                 "hide" if !val.is_empty() => cfg.hide.push(val.to_lowercase()),
                 "bootnext" if !val.is_empty() => cfg.bootnext.push(val.to_lowercase()),
+                "stay-default" => cfg.stay_default = !matches!(val, "off" | "no" | "false" | "0"),
                 "debug" => cfg.debug = matches!(val, "on" | "yes" | "true" | "1"),
                 "clock" => cfg.clock = !matches!(val, "off" | "no" | "false" | "0"),
                 "resolution" => {

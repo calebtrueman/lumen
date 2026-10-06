@@ -156,7 +156,19 @@ three places:
   localised output.
 - **Linux.** `lumen-heal.service` does the same at every boot and shutdown.
 
+- **Lumen itself, while you use other systems.** Installing another Linux
+  or a GRUB update runs `grub-install`, which puts that distro's entry first.
+  Windows updates can do the same. Whenever Lumen starts an OS, it also sets
+  the firmware's one-shot "next boot" to Lumen. Those tools change the boot
+  order but not that setting, so the next start lands in Lumen anyway, and
+  Lumen takes first place back. Turn this off with `stay-default off` in
+  `lumen.conf`.
+
 None of these ever remove other entries.
+
+> If something did take over before this was in place (Lumen 0.3.0 and
+> earlier), open your PC's boot menu once (often F11, F12 or F8 at power-on)
+> and choose **Lumen**: it moves itself back to first.
 
 ## It can't strand you
 
@@ -267,6 +279,7 @@ bootnext Windows     # start via firmware entry + reboot (BitLocker-safe)
 resolution keep      # keep | max | 1920x1080
 clock off
 debug on             # on-screen frame timing, for performance reports
+stay-default off     # don't make the next start return to Lumen (see Update-proof)
 entry Arch (fallback) | \EFI\Linux\arch-linux.efi | initrd=\initramfs-linux-fallback.img
 ```
 
