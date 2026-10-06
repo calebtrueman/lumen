@@ -9,3 +9,6 @@ target = "x86_64-unknown-uefi"
 # the entry stub in src/main.rs, which makes sure SSE is switched on first.
 [alias]
 efi-x64 = ["build", "-p", "lumen", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc,compiler_builtins", "-Zbuild-std-features=compiler-builtins-mem", "--target", "targets/x86_64-lumen-uefi.json"]
+# Lumen for BIOS PCs (32-bit, SSE2): `cargo bios`, then tools/bios/build.sh
+# turns the two programs into the disk image the installers write.
+bios = ["build", "-p", "lumen-bios", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc,compiler_builtins", "-Zbuild-std-features=compiler-builtins-mem", "--target", "targets/i686-lumen-bios.json"]

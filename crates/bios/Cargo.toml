@@ -1,0 +1,28 @@
+[package]
+name = "lumen-bios"
+description = "Lumen for BIOS PCs (and UEFI PCs in legacy mode)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Two programs, each linked as a flat image at a fixed address
+# (see the linker scripts and tools/bios/build.sh):
+#   stage2  low memory: real-mode services, then unpacks the payload
+#   lumen   the menu itself, at 32 MiB
+[[bin]]
+name = "stage2"
+path = "src/stage2/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+lumen-core = { path = "../core" }
+libm = "0.2.16"
+linked_list_allocator = { version = "0.10", default-features = false, features = ["const_mut_refs"] }
+miniz_oxide = { version = "0.8", default-features = false }

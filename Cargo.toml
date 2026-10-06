@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/uefi"]
+members = ["crates/core", "crates/uefi", "crates/bios"]
 exclude = ["tools/gallery", "installer/windows"]
 resolver = "3"
 
