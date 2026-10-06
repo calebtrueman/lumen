@@ -24,5 +24,9 @@ bench = false
 [dependencies]
 lumen-core = { path = "../core" }
 libm = "0.2.16"
-linked_list_allocator = { version = "0.10", default-features = false, features = ["const_mut_refs"] }
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
 miniz_oxide = { version = "0.8", default-features = false }
+
+[features]
+# Log to QEMU's debug console (port 0xE9). Testing only.
+debugcon = []

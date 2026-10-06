@@ -43,7 +43,7 @@ pub mod header {
     pub const STAGE2: u64 = 3;
 }
 
-/// Registers for a BIOS call (layout matches boot.s).
+/// Registers for a BIOS call (layout matches boot.s: keep them in step).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Regs {
@@ -58,6 +58,8 @@ pub struct Regs {
     pub es: u16,
     pub eflags: u32,
 }
+
+const _: () = assert!(core::mem::offset_of!(Regs, ds) == 28 && core::mem::offset_of!(Regs, es) == 30 && core::mem::offset_of!(Regs, eflags) == 32);
 
 impl Regs {
     pub fn carry(&self) -> bool {

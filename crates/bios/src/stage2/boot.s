@@ -238,8 +238,9 @@ pm_entry:
     jmp 4b
 
 // extern "C" fn bios_int(n: u32): one BIOS interrupt with the registers in
-// the block at REGS (eax ebx ecx edx esi edi ebp ds es eflags), which
-// receives the results. Interrupts are enabled while in real mode, so
+// the block at REGS (eax ebx ecx edx esi edi ebp: u32 at 0..28, ds es: u16
+// at 28 and 30, eflags: u32 at 32; Regs in common.rs), which receives the
+// results. Interrupts are enabled while in real mode, so
 // pending keyboard/timer/mouse interrupts are serviced there.
 .global bios_int
 bios_int:
@@ -250,6 +251,13 @@ bios_int:
     mov eax, [esp + 20]
     mov [int_no], al
     mov [saved_esp], esp
+    sidt [saved_idt]
+    // The BIOS may change CR0/CR4 (SeaBIOS switches modes internally);
+    // keep Lumen's x87/SSE settings across the call.
+    mov eax, cr0
+    mov [saved_cr0], eax
+    mov eax, cr4
+    mov [saved_cr4], eax
     ljmp 0x08, offset rm16
 .code16
 rm16:
@@ -271,7 +279,7 @@ rm_real:
     mov gs, ax
     mov sp, RM_STACK
     lidt [rm_idt]
-    mov ax, [REGS + 32]
+    mov ax, [REGS + 30]
     mov es, ax
     mov ebx, [REGS + 4]
     mov ecx, [REGS + 8]
@@ -285,6 +293,7 @@ rm_real:
     sti
     .byte 0xCD                       // int imm8 (patched above)
 int_no: .byte 0
+    pushfd                           // the results are in the flags too
     cli
     push ds
     push eax
@@ -301,10 +310,9 @@ int_no: .byte 0
     pop ax
     mov [REGS + 28], ax
     mov ax, es
-    mov [REGS + 32], ax
-    pushfd
-    pop eax
-    mov [REGS + 36], eax
+    mov [REGS + 30], ax
+    pop eax                          // flags pushed right after the call
+    mov [REGS + 32], eax
     lgdt [gdt_desc]
     mov eax, cr0
     or eax, 1
@@ -319,6 +327,12 @@ pm_back:
     mov gs, ax
     mov ss, ax
     mov esp, [saved_esp]
+    lidt [saved_idt]
+    mov eax, [saved_cr4]
+    mov cr4, eax
+    mov eax, [saved_cr0]
+    mov cr0, eax
+    cld                              // Rust expects DF clear; BIOSes may not
     pop edi
     pop esi
     pop ebx
@@ -408,6 +422,10 @@ rm_idt:
     .word 0x3FF
     .long 0
 saved_esp: .long 0
+saved_cr0: .long 0
+saved_cr4: .long 0
+saved_idt: .word 0
+    .long 0
 chain_drive: .byte 0x80
 .balign 2
 chain_si: .word 0
