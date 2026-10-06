@@ -4,7 +4,9 @@
 use crate::config::Config;
 use crate::gfx::rgb;
 use crate::icons::{Glyph, Icon};
+use crate::linux_boot;
 use crate::os;
+use lumen_core::linux;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -45,6 +47,14 @@ pub struct Entry {
     /// Known only from NVRAM (file system not readable by firmware, e.g.
     /// APFS without a driver); can only be started via `BootNext`.
     pub nvram_only: bool,
+    /// A Linux install Lumen starts itself (kernel + initrd).
+    pub linux: Option<linux_boot::Target>,
+    /// For a Linux card: whether `device_path` is the distro's own loader,
+    /// used if starting the kernel directly fails.
+    pub has_loader: bool,
+    /// For a distro loader folder on the ESP: the file system its
+    /// `grub.cfg` stub searches for (how GRUB finds /boot).
+    pub grub_root: Option<String>,
 }
 
 /// Where Lumen itself was loaded from, so it doesn't list itself.
@@ -112,29 +122,7 @@ impl Volume {
             .map(|l| l.volume_label().to_string())
             .unwrap_or_default();
         let removable = open::<BlockIO>(handle).map(|b| b.media().is_removable_media()).unwrap_or(false);
-
-        let mut partition = None;
-        let mut bus = None;
-        for node in path.node_iter() {
-            match node.as_enum() {
-                Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => partition = Some(hd.partition_number()),
-                Ok(DevicePathNodeEnum::MessagingUsb(_) | DevicePathNodeEnum::MessagingUsbClass(_)) => bus = Some("USB drive"),
-                Ok(DevicePathNodeEnum::MessagingNvmeNamespace(_)) => bus = bus.or(Some("NVMe disk")),
-                Ok(DevicePathNodeEnum::MessagingSata(_) | DevicePathNodeEnum::MessagingAtapi(_)) => bus = bus.or(Some("SATA disk")),
-                Ok(DevicePathNodeEnum::MessagingSd(_) | DevicePathNodeEnum::MessagingEmmc(_)) => bus = bus.or(Some("SD/eMMC")),
-                Ok(DevicePathNodeEnum::MessagingScsi(_) | DevicePathNodeEnum::MessagingSasEx(_)) => bus = bus.or(Some("SCSI disk")),
-                _ => {}
-            }
-        }
-        let usb = bus == Some("USB drive");
-        let bus = if removable && !usb { "Removable disk" } else { bus.unwrap_or("Internal disk") };
-        let mut location = String::from(bus);
-        if !label.trim().is_empty() {
-            location = format!("{} · {}", label.trim(), location);
-        }
-        if let Some(p) = partition {
-            location = format!("{location} · Partition {p}");
-        }
+        let (location, usb) = describe(&path, &label, removable);
         let part_key = partition_key(&path);
         Some(Self { fs: FileSystem::new(sfs), part_key, path, label, location, removable: removable || usb })
     }
@@ -168,8 +156,38 @@ impl Volume {
             utility,
             boot_option: None,
             nvram_only: false,
+            linux: None,
+            has_loader: false,
+            grub_root: None,
         }
     }
+}
+
+/// "Label · NVMe disk · Partition 2", and whether it's on USB.
+fn describe(path: &DevicePath, label: &str, removable: bool) -> (String, bool) {
+    let mut partition = None;
+    let mut bus = None;
+    for node in path.node_iter() {
+        match node.as_enum() {
+            Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => partition = Some(hd.partition_number()),
+            Ok(DevicePathNodeEnum::MessagingUsb(_) | DevicePathNodeEnum::MessagingUsbClass(_)) => bus = Some("USB drive"),
+            Ok(DevicePathNodeEnum::MessagingNvmeNamespace(_)) => bus = bus.or(Some("NVMe disk")),
+            Ok(DevicePathNodeEnum::MessagingSata(_) | DevicePathNodeEnum::MessagingAtapi(_)) => bus = bus.or(Some("SATA disk")),
+            Ok(DevicePathNodeEnum::MessagingSd(_) | DevicePathNodeEnum::MessagingEmmc(_)) => bus = bus.or(Some("SD/eMMC")),
+            Ok(DevicePathNodeEnum::MessagingScsi(_) | DevicePathNodeEnum::MessagingSasEx(_)) => bus = bus.or(Some("SCSI disk")),
+            _ => {}
+        }
+    }
+    let usb = bus == Some("USB drive");
+    let bus = if removable && !usb { "Removable disk" } else { bus.unwrap_or("Internal disk") };
+    let mut location = String::from(bus);
+    if !label.trim().is_empty() {
+        location = format!("{} · {}", label.trim(), location);
+    }
+    if let Some(p) = partition {
+        location = format!("{location} · Partition {p}");
+    }
+    (location, usb)
 }
 
 /// Appends a file path node to a partition's device path.
@@ -357,7 +375,9 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
                     None => (titlecase(&dir), neutral_icon(&dir)),
                 },
             };
-            found.push(vol.entry(title, file, icon, None, false));
+            let mut e = vol.entry(title, file, icon, None, false);
+            e.grub_root = vol.read(&format!("{path}\\grub.cfg"), 64 * 1024).and_then(|t| grub_stub_root(&t));
+            found.push(e);
         }
 
         // Unified kernel images (systemd-boot "type 2" entries).
@@ -405,6 +425,9 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
     }
 
     merge_firmware_entries(&mut entries, &mut volumes, me);
+    if cfg.linux_direct {
+        add_linux(&mut entries);
+    }
 
     entries.retain(|e| {
         let hay = format!("{} {}", e.title, e.file).to_lowercase();
@@ -554,6 +577,9 @@ fn merge_firmware_entries(entries: &mut Vec<Entry>, volumes: &mut [Volume], me: 
             utility: false,
             boot_option: Some(opt.num),
             nvram_only,
+            linux: None,
+            has_loader: false,
+            grub_root: None,
         });
     }
 }
@@ -598,6 +624,125 @@ fn unique_ids(entries: &mut [Entry]) {
         let repeats = entries[..i].iter().filter(|e| e.id == entries[i].id || e.id.starts_with(&format!("{}#", entries[i].id))).count();
         if repeats > 0 {
             entries[i].id = format!("{}#{}", entries[i].id, repeats + 1);
+        }
+    }
+}
+
+/// The UUID a distro's ESP `grub.cfg` stub searches for, e.g.
+/// `search.fs_uuid 0b9f... root` or `search --fs-uuid --set=dev 0b9f...`.
+fn grub_stub_root(text: &[u8]) -> Option<String> {
+    let text = core::str::from_utf8(text).ok()?;
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.first() {
+            Some(&"search.fs_uuid") => return words.get(1).map(|s| s.to_string()),
+            Some(&"search") if words.contains(&"--fs-uuid") || words.contains(&"-u") => {
+                return words.iter().skip(1).find(|w| !w.starts_with('-') && w.len() >= 8).map(|s| s.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Linux PARTUUID for a partition: the GPT partition GUID, or for MBR
+/// disks "<disk signature>-<partition number>" as the kernel spells it.
+fn linux_partuuid(dp: &DevicePath) -> String {
+    dp.node_iter()
+        .find_map(|node| match node.as_enum() {
+            Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => Some(match hd.partition_signature() {
+                PartitionSignature::Guid(g) => format!("{g}").to_lowercase(),
+                PartitionSignature::Mbr(s) => format!("{:08x}-{:02x}", u32::from_le_bytes(s), hd.partition_number()),
+                _ => String::new(),
+            }),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Linux installs Lumen can start directly. Each one takes over the card of
+/// its distro's own loader on the ESP when that's clearly the same system,
+/// keeping the loader as a fallback (and its id, so a remembered choice
+/// still points at it).
+fn add_linux(entries: &mut Vec<Entry>) {
+    let mut parts = Vec::new();
+    let mut where_ = Vec::new();
+    for h in boot::find_handles::<BlockIO>().unwrap_or_default() {
+        let Some(block) = open::<BlockIO>(h) else { continue };
+        let m = block.media();
+        // Partitions on fixed disks only: a USB stick stays one card.
+        if !m.is_logical_partition() || m.is_removable_media() || !m.is_media_present() {
+            continue;
+        }
+        drop(block);
+        let Some(path) = open::<DevicePath>(h).map(|p| p.to_boxed()) else { continue };
+        if path.node_iter().any(|n| matches!(n.as_enum(), Ok(DevicePathNodeEnum::MessagingUsb(_) | DevicePathNodeEnum::MessagingUsbClass(_)))) {
+            continue;
+        }
+        let Some(fs) = linux_boot::open_fs(h) else { continue };
+        parts.push(linux::Part { fs, partuuid: linux_partuuid(&path) });
+        where_.push((h, path));
+    }
+    for inst in linux::discover(&mut parts) {
+        let (handle, ref path) = where_[inst.boot];
+        let boot_uuid = parts[inst.boot].fs.uuid();
+        log::info!("linux {:?} {} on {boot_uuid}: {} {:?} [{}]", inst.name, inst.version, inst.kernel, inst.initrds, inst.cmdline);
+        let loaders: Vec<usize> = (0..entries.len())
+            .filter(|&i| {
+                let e = &entries[i];
+                e.linux.is_none() && !e.utility && !e.nvram_only && e.file.to_lowercase().starts_with("\\efi\\")
+                    && !e.file.to_lowercase().starts_with("\\efi\\microsoft")
+            })
+            .collect();
+        let by_uuid: Vec<usize> =
+            loaders.iter().copied().filter(|&i| entries[i].grub_root.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(&boot_uuid))).collect();
+        let by_name: Vec<usize> = loaders
+            .iter()
+            .copied()
+            .filter(|&i| entries[i].grub_root.is_none() || by_uuid.is_empty())
+            .filter(|&i| entries[i].title == inst.name || inst.os.is_some_and(|o| entries[i].title == o.name))
+            .collect();
+        let loader = match (by_uuid.as_slice(), by_name.as_slice()) {
+            ([one], _) => Some(*one),
+            ([], [one]) => Some(*one),
+            _ => None,
+        };
+        let target = linux_boot::Target {
+            partition: handle,
+            partition_path: path.to_boxed(),
+            kernel: inst.kernel.clone(),
+            initrds: inst.initrds.clone(),
+            cmdline: inst.cmdline.clone(),
+            version: inst.version.clone(),
+        };
+        let icon = inst.os.map(|o| o.icon).unwrap_or(os::LINUX);
+        match loader {
+            Some(i) => {
+                let e = &mut entries[i];
+                log::info!("  takes over loader {:?} ({})", e.title, e.file);
+                e.title = inst.name.clone();
+                e.icon = icon;
+                e.linux = Some(target);
+                e.has_loader = true;
+            }
+            None => {
+                let (location, _) = describe(path, &parts[inst.boot].fs.label(), false);
+                entries.push(Entry {
+                    id: inst.id(&parts),
+                    title: inst.name.clone(),
+                    location,
+                    file: inst.kernel.clone(),
+                    icon,
+                    device_path: path.to_boxed(),
+                    options: None,
+                    utility: false,
+                    boot_option: None,
+                    nvram_only: false,
+                    linux: Some(target),
+                    has_loader: false,
+                    grub_root: None,
+                });
+            }
         }
     }
 }

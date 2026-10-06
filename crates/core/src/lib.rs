@@ -12,6 +12,7 @@ pub mod fs;
 pub mod gfx;
 pub mod icons;
 pub mod input;
+pub mod linux;
 pub mod os;
 pub mod text;
 pub mod ui;

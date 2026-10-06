@@ -8,6 +8,7 @@ extern crate alloc;
 mod clock;
 mod discover;
 mod launch;
+mod linux_boot;
 mod mouse;
 
 pub use lumen_core::{config, gfx, icons, os, text, ui};
@@ -282,9 +283,11 @@ fn cards(entries: &[Entry]) -> Vec<ui::Card> {
             id: e.id.clone(),
             title: e.title.clone(),
             location: e.location.clone(),
-            detail: match &e.options {
-                Some(o) => format!("{}  {}", e.file, o),
-                None => e.file.clone(),
+            detail: match (&e.linux, &e.options) {
+                (Some(l), _) if !l.version.is_empty() => format!("Linux {}", l.version),
+                (Some(l), _) => l.kernel.clone(),
+                (None, Some(o)) => format!("{}  {}", e.file, o),
+                (None, None) => e.file.clone(),
             },
             icon: e.icon,
         })
@@ -333,6 +336,14 @@ fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
         launch::arm_return_to_lumen();
     }
     let _ = system::with_stdout(|o| o.clear());
+    if let Some(target) = &entry.linux {
+        let why = linux_boot::boot(target);
+        log::info!("direct start of {:?} failed: {why}", entry.title);
+        if !entry.has_loader {
+            return format!("Couldn't start {} — {why}", entry.title);
+        }
+        // Fall back to the distro's own boot loader.
+    }
     match launch::start(entry) {
         // The loader ran and came back (e.g. the user left the UEFI shell).
         launch::Outcome::Exited => String::new(),

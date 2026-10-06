@@ -10,6 +10,7 @@ lumen-core = { path = "../core" }
 libm = "0.2.16"
 log = "0.4.34"
 uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "logger"] }
+uefi-raw = "0.17"
 
 [features]
 # Send log output to the QEMU debug console (I/O port 0xE9). Testing only.

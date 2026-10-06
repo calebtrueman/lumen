@@ -9,6 +9,8 @@
 //! resolution max         # "keep", "max" or WIDTHxHEIGHT
 //! clock off              # hide the clock
 //! stay-default off       # don't guard Lumen's place as the default (see README)
+//! linux-direct off       # start Linux through its own boot loader (GRUB)
+//!                        # instead of loading the kernel directly
 //! bootnext Windows       # start matching entries via the firmware's own
 //!                        # boot entry + reboot (BitLocker-safe)
 //! entry Arch (fallback) | \EFI\arch\vmlinuz-linux.efi | initrd=\initramfs-linux-fallback.img
@@ -41,6 +43,9 @@ pub struct Config {
     /// installers and updates that reorder the boot entries can't take over
     /// (`stay-default off` to disable).
     pub stay_default: bool,
+    /// Start Linux kernels directly (falling back to the distro's own
+    /// loader if that fails). `linux-direct off` to always use the loader.
+    pub linux_direct: bool,
     pub bootnext: Vec<String>,
     pub entries: Vec<CustomEntry>,
 }
@@ -55,6 +60,7 @@ impl Default for Config {
             clock: true,
             debug: false,
             stay_default: true,
+            linux_direct: true,
             bootnext: Vec::new(),
             entries: Vec::new(),
         }
@@ -76,6 +82,7 @@ impl Config {
                 "hide" if !val.is_empty() => cfg.hide.push(val.to_lowercase()),
                 "bootnext" if !val.is_empty() => cfg.bootnext.push(val.to_lowercase()),
                 "stay-default" => cfg.stay_default = !matches!(val, "off" | "no" | "false" | "0"),
+                "linux-direct" => cfg.linux_direct = !matches!(val, "off" | "no" | "false" | "0"),
                 "debug" => cfg.debug = matches!(val, "on" | "yes" | "true" | "1"),
                 "clock" => cfg.clock = !matches!(val, "off" | "no" | "false" | "0"),
                 "resolution" => {

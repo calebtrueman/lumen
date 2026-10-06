@@ -6,6 +6,7 @@
 # committed release/lumen.cer: PCs that approved Lumen trust only that key.
 # For throwaway test builds (CI), set LUMEN_TEST_KEY=1: a separate test key
 # in keys-test/ is used (created if needed) and the check is skipped.
+# LUMEN_FEATURES=debugcon adds the QEMU debug-console log (tests only).
 set -eu
 cd "$(dirname "$0")/.."
 ARCH=${1:-x86_64}
@@ -49,10 +50,10 @@ fi
 [ -f "vendor/shim/$ARCH/shim$S.efi" ] || tools/fetch-shim.sh
 if [ "$ARCH" = x86_64 ]; then
     # SSE2 hardware floating point; see targets/x86_64-lumen-uefi.json.
-    cargo efi-x64
+    cargo efi-x64 ${LUMEN_FEATURES:+--features "$LUMEN_FEATURES"}
     EFI=target/x86_64-lumen-uefi/release/lumen.efi
 else
-    cargo build -p lumen --release --target "$ARCH-unknown-uefi"
+    cargo build -p lumen --release --target "$ARCH-unknown-uefi" ${LUMEN_FEATURES:+--features "$LUMEN_FEATURES"}
     EFI=target/$ARCH-unknown-uefi/release/lumen.efi
 fi
 
