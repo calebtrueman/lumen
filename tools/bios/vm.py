@@ -18,7 +18,7 @@ from vm import ppm_to_png  # noqa: E402
 
 def main():
     args = sys.argv[1:]
-    takes_value = {"--wait", "--shot", "--key", "--mem"}
+    takes_value = {"--wait", "--shot", "--key", "--mem", "--usb"}
     disks = [a for i, a in enumerate(args)
              if not a.startswith("--") and (i == 0 or args[i - 1] not in takes_value)
              and a.endswith((".img", ".qcow2", ".raw")) and os.path.isfile(a)]
@@ -34,10 +34,17 @@ def main():
            "-monitor", f"unix:{sock},server,nowait"]
     if "--window" not in args:
         cmd += ["-display", "none"]
+    usb = [args[i + 1] for i, a in enumerate(args) if a == "--usb"]
     for i, d in enumerate(disks):
+        if d in usb:
+            continue
         fmt = "qcow2" if d.endswith(".qcow2") else "raw"
         snap = ",snapshot=on" if fmt == "qcow2" or "--snapshot" in args else ""
         cmd += ["-drive", f"file={d},format={fmt},if=ide,index={i}{snap}"]
+    if usb:
+        cmd += ["-device", "qemu-xhci,id=xhci"]
+        for j, u in enumerate(usb):
+            cmd += ["-drive", f"file={u},format=raw,if=none,id=usb{j}", "-device", f"usb-storage,bus=xhci.0,drive=usb{j}"]
     q = subprocess.Popen(cmd, stderr=subprocess.PIPE)
     for _ in range(50):
         if os.path.exists(sock):

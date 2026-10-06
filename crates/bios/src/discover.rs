@@ -111,10 +111,13 @@ pub fn scan(drives: &[Drive]) -> Vec<Entry> {
 
     for (di, d) in drives.iter().enumerate() {
         let Some(table) = disk::table(d) else { continue };
-        // A USB drive is one thing to start: its own boot code.
-        if d.usb() && d.number != own {
+        // A USB drive is one thing to start: its own boot code. Not every
+        // BIOS says which disks are USB; a disk holding a CD/DVD image
+        // (ISO 9660, as live and installer sticks do) is one either way.
+        let iso = if d.number != own { iso_label(d) } else { None };
+        if (d.usb() || iso.is_some()) && d.number != own {
             if table.mbr[510] == 0x55 && table.mbr[511] == 0xAA {
-                let label = iso_label(d).unwrap_or_default();
+                let label = iso.unwrap_or_default();
                 let (title, icon) = match os::identify(&label).filter(|o| o.name != "Linux").or_else(|| os::identify_text(label.as_bytes())) {
                     Some(o) => (format!("{} (USB)", o.name), o.icon),
                     None if !label.is_empty() => (label.clone(), os::DRIVE),
