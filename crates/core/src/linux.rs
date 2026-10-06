@@ -703,7 +703,9 @@ fn clean_title(t: &str) -> String {
 fn version_from_path(p: &str) -> String {
     let name = p.rsplit('/').next().unwrap_or(p);
     for prefix in ["vmlinuz-", "vmlinux-", "linux-", "Image-", "bzImage-", "kernel-"] {
-        if let Some(v) = name.strip_prefix(prefix) {
+        // Arch names kernels after their package ("vmlinuz-linux",
+        // "vmlinuz-linux-lts"): that's not a version.
+        if let Some(v) = name.strip_prefix(prefix).filter(|v| v.starts_with(|c: char| c.is_ascii_digit())) {
             return v.to_string();
         }
     }
@@ -877,6 +879,13 @@ menuentry 'openSUSE Tumbleweed'  --class opensuse --class gnu-linux --class gnu 
         assert_eq!(e.options, "root=UUID=r ro rhgb quiet");
         assert_eq!(e.initrds, ["/initramfs-6.8.9-300.fc40.x86_64.img"]);
         assert_eq!(clean_title(&e.title), "Fedora Linux 40 (Workstation Edition)");
+    }
+
+    #[test]
+    fn kernel_file_versions() {
+        assert_eq!(version_from_path("/boot/vmlinuz-6.8.0-31-generic"), "6.8.0-31-generic");
+        assert_eq!(version_from_path("/boot/vmlinuz-linux"), "");
+        assert_eq!(version_from_path("/vmlinuz-linux-lts"), "");
     }
 
     #[test]
