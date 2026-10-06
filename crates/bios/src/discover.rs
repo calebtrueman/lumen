@@ -191,20 +191,35 @@ pub fn scan(drives: &[Drive]) -> Vec<Entry> {
     entries.splice(start..start, linux_entries);
 
     // The boot loader Lumen replaced: always reachable (Shift at power-on
-    // does the same).
-    if matches!(original_kind, MbrKind::Grub | MbrKind::Other | MbrKind::Windows) {
-        let detail = match original_kind {
-            MbrKind::Grub => "GRUB",
-            MbrKind::Windows => "Windows boot code",
-            _ => "The PC's previous boot code",
+    // does the same), unless a Windows card already starts it.
+    let windows_uses_it = entries.iter().any(|e| matches!(e.target, Target::Mbr { original: true, .. }) && !e.utility);
+    if matches!(original_kind, MbrKind::Grub | MbrKind::Other | MbrKind::Windows) && !windows_uses_it {
+        let (title, detail) = match original_kind {
+            MbrKind::Grub => ("GRUB", "The boot loader before Lumen"),
+            MbrKind::Windows => ("Windows Boot", "The boot code before Lumen"),
+            _ => ("Previous Loader", "The boot code before Lumen"),
         };
         entries.push(Entry {
-            card: card(String::from("original-mbr"), String::from("Previous Boot Loader"), String::from("Before Lumen"), detail.to_string(), os::GEAR),
+            card: card(String::from("original-mbr"), title.to_string(), location(&drives[0], None, ""), detail.to_string(), os::GEAR),
             target: Target::Mbr { drive: own, original: true },
             utility: true,
         });
     }
+    disambiguate(&mut entries);
     entries
+}
+
+/// Same-named entries (Windows on two disks, say) get their disk added.
+fn disambiguate(entries: &mut [Entry]) {
+    let titles: Vec<String> = entries.iter().map(|e| e.card.title.clone()).collect();
+    for e in entries.iter_mut() {
+        if titles.iter().filter(|t| **t == e.card.title).count() > 1 {
+            let place = e.card.location.split(" · ").find(|p| p.contains("disk") || p.contains("Disk")).unwrap_or("").to_string();
+            if !place.is_empty() {
+                e.card.title = format!("{} ({place})", e.card.title);
+            }
+        }
+    }
 }
 
 fn card(id: String, title: String, location: String, detail: String, icon: lumen_core::icons::Icon) -> ui::Card {

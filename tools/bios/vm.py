@@ -49,7 +49,10 @@ def main():
     mon.connect(sock)
 
     def send(c):
-        mon.sendall((c + "\n").encode())
+        try:
+            mon.sendall((c + "\n").encode())
+        except OSError:
+            pass  # the VM has gone (e.g. powered off)
         time.sleep(0.3)
 
     i = 0
@@ -68,6 +71,8 @@ def main():
         i += 1
     if "--window" in args:
         q.wait()
+    if q.poll() is not None:
+        print("vm: powered off by itself")
     q.kill()
     q.wait()
     print(open(log, errors="replace").read()[-3000:])
