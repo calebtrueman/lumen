@@ -2,14 +2,16 @@
 
 ![Lumen's boot menu with Windows, Fedora, Ubuntu and Arch Linux, counting down to start Windows](docs/screenshots/menu.png)
 
-A graphical OS picker for UEFI PCs. It runs before any operating system,
-finds every OS on every drive and USB stick, and starts the one you pick.
-Each OS gets a card with its real logo in its brand colours. Animations are
-smooth, and you can use the keyboard or a mouse/touchpad.
+A graphical OS picker for PCs, new and old: UEFI PCs, and PCs that start in
+legacy BIOS mode. It runs before any operating system, finds every OS on
+every drive and USB stick, and starts the one you pick. Each OS gets a card
+with its real logo in its brand colours. Animations are smooth, and you can
+use the keyboard or a mouse/touchpad.
 
-Lumen doesn't replace GRUB or Windows Boot Manager; it starts them. Picking
-Windows starts `bootmgfw.efi` directly, and picking Ubuntu starts Ubuntu's own
-shim/GRUB. Lumen works with Secure Boot on, survives Windows updates and
+Picking Windows starts Windows Boot Manager. Picking Linux starts the Linux
+kernel **directly**: Lumen reads the distro's own boot configuration from its
+file system, so GRUB isn't involved (it stays installed, as a fallback).
+Lumen works with Secure Boot on, survives Windows updates, GRUB updates and
 firmware updates, and can't leave a PC unbootable.
 
 ## Finding every OS
@@ -50,6 +52,68 @@ so Lumen recognised it from the Debian certificate inside its shim.*
 
 Partitions are matched by signature *and* file, so cloned disks and sticks
 flashed from the same ISO are handled correctly.
+
+## Starting Linux without GRUB
+
+Lumen reads Linux file systems itself (ext2/3/4, XFS, Btrfs with zlib, zstd
+and LZO compression and subvolumes, and FAT), finds each install's boot
+configuration, and starts its kernel:
+
+- **Where the kernel and its options come from:** Boot Loader Specification
+  entries (`loader/entries/*.conf`: Fedora, RHEL and its rebuilds,
+  Bazzite/Silverblue, systemd-boot setups) or the first menu entry of
+  `grub.cfg` (Debian, Ubuntu, Mint, Arch, openSUSE...), with GRUB's
+  variables, `search` commands and Btrfs subvolume paths resolved. The newest
+  kernel is used, with exactly the command line the distro wrote.
+- **Names come from the installed system** (`/etc/os-release`, found from
+  `root=` on the kernel command line), so Mint is "Linux Mint" even though it
+  boots from Ubuntu's folder, and Bazzite isn't mistaken for Fedora.
+- **On UEFI PCs** the kernel's EFI stub is started with the command line, and
+  the initrd is handed over through the standard `LINUX_EFI_INITRD_MEDIA`
+  protocol (Linux 5.8 and later).
+- **Under Secure Boot** the kernel must pass shim's own check, exactly as it
+  must when GRUB loads it. Debian kernels (and anything signed with an
+  enrolled MOK) start directly; other distros' kernels are signed with keys
+  only their own shim trusts, so Lumen starts that distro's shim and GRUB
+  instead. Nothing is ever started that shim rejects.
+- **If anything fails,** Lumen falls back to the distro's own boot loader,
+  which is still installed. The distro's loader card is merged into its Linux
+  card, so each system appears once.
+
+Tested by starting real installs of Debian 13, Ubuntu 24.04, Fedora 44
+(Btrfs, BLS), openSUSE Tumbleweed (Btrfs snapshots), Arch Linux and
+AlmaLinux 9 (XFS) to their login prompts. `linux-direct off` in `lumen.conf`
+goes back to always starting the distro's boot loader.
+
+## Older PCs (legacy BIOS)
+
+![Lumen on a BIOS PC: Windows, Debian started directly, and GRUB kept as the previous boot loader](docs/screenshots/bios.png)
+
+PCs without UEFI, and UEFI PCs set to legacy/CSM mode, get the same menu.
+The installers notice which mode the PC started in.
+
+- **Where it lives:** Lumen's boot code goes in the boot disk's MBR (its
+  partition table and disk signature are kept), and the rest (about 500 KB)
+  in the empty space before the first partition, which every disk
+  partitioned since Windows Vista has (1 MB). The installer refuses if that
+  space is in use by anything else, and stays clear of GRUB's core image.
+- **What it starts:** Windows (through its own boot code, exactly as before
+  Lumen), Linux (the kernel directly, through the Linux x86 boot protocol),
+  live USB sticks, other bootable disks, and the boot loader that was there
+  before (shown as e.g. "GRUB").
+- **It can't strand you:** hold **Shift** while the PC starts to skip Lumen
+  and start the previous boot loader. Lumen also falls back to it by itself
+  if its own data is damaged or it hits an error.
+- **BitLocker** is paused for one restart whenever the boot code changes, so
+  Windows never asks for the recovery key.
+- **Update-proof:** if a GRUB update (`grub-install`) or a Windows repair tool
+  writes its own boot code into the MBR, the repair task (Windows) or
+  `lumen-heal` (Linux) puts Lumen back at the next shutdown, keeping the new
+  boot code as the previous boot loader.
+- **Uninstalling** puts the previous boot code back.
+
+Requirements: a 64-bit PC with VESA graphics (any PC from the last 20 years),
+and 64-bit Windows or Linux to run the installer from.
 
 ## Icons
 
@@ -208,6 +272,9 @@ because that screen uses a US keyboard layout.
   free space and the processor type. On Linux it also installs `efibootmgr`
   if needed and mounts the EFI partition if your distro doesn't.
 - **Files are written under a temporary name, then verified.**
+- **On BIOS PCs**, the only existing thing changed is the MBR's 440 bytes of
+  boot code, which are kept and stay one card (or Shift) away. Lumen's data
+  is written and read back before the MBR is touched.
 - **Logs:** `%ProgramData%\Lumen\install.log` on Windows; terminal output
   on Linux.
 
@@ -280,6 +347,7 @@ resolution keep      # keep | max | 1920x1080
 clock off
 debug on             # on-screen frame timing, for performance reports
 stay-default off     # don't make the next start return to Lumen (see Update-proof)
+linux-direct off     # start Linux through its own boot loader instead of directly
 entry Arch (fallback) | \EFI\Linux\arch-linux.efi | initrd=\initramfs-linux-fallback.img
 ```
 
@@ -310,15 +378,29 @@ tools/linux-vm-test.py debian-13-genericcloud-arm64.qcow2   # real Debian: insta
 Discovery decisions are logged to `target/vm/debug.log` in `debugcon`
 builds.
 
+More tests:
+
+| Test | What it checks |
+| --- | --- |
+| `cargo test -p lumen-core --test fs` | every file system reader, byte for byte, against images made by the real `mkfs` tools (`tools/test/make-fs-fixtures.sh`, needs Docker) |
+| `tools/test/linux-direct.py DISK.qcow2 [--secureboot]` | Lumen starts a real distro's kernel itself on UEFI (and, under Secure Boot, only kernels shim accepts) |
+| `tools/test/bios-smoke.sh` | Lumen for BIOS under SeaBIOS: menu, Windows chains, damaged-data fallback, power off |
+| `tools/test/linux-bios-test.py DISK.qcow2` | real Debian in BIOS mode: install, `grub-install` displaces Lumen, heal, Lumen starts Debian directly, uninstall |
+| `cargo test -p lumen-biosinstall` | the BIOS installer on MBR/GPT/GRUB disks: free-space checks, update, heal, uninstall |
+
 ## Known limits
 
-- BIOS/legacy (CSM) installs can't be started from UEFI and are hidden.
-- Distros that install into another distro's folder, such as Mint, Pop!_OS,
-  Zorin and elementary in `\EFI\ubuntu`, are shown as that folder's name.
-  Telling them apart would need reading the Linux root filesystem (ext4/btrfs).
+- On a UEFI PC, operating systems installed in legacy BIOS mode can't be
+  started (the firmware doesn't allow it) and are hidden; the same goes the
+  other way round.
+- Linux on LVM or LUKS: the kernel is found when `/boot` is a plain
+  partition (the usual layout), but the name then comes from the boot
+  entry's title rather than os-release.
 - Under Secure Boot, Lumen can only directly start loaders trusted by the
   firmware's `db`, such as Windows and distro shims. Anything signed only by
   a MOK falls back to its firmware entry.
+- The BIOS edition needs about 500 KB free before the first partition;
+  disks partitioned by Windows XP or older (63 sectors) don't have it.
 - Rendering is done in software on the CPU. It's only been tested in QEMU
   (emulated x86 on Apple Silicon), so smoothness on real hardware, especially
   4K panels, still needs checking.
@@ -327,12 +409,10 @@ builds.
 
 | Path | Contents |
 | --- | --- |
-| `src/discover.rs` | controller connect, partition scan, USB identification, NVRAM merge |
-| `src/os.rs` | OS table: names, brand tiles, logos, recognition clues |
-| `src/launch.rs` | chainload, BootNext, boot-order self-heal, firmware setup |
-| `src/mouse.rs` | relative/absolute pointer input |
-| `src/ui.rs` | layout, animation, hit-testing, input |
-| `src/gfx.rs`, `src/icons.rs`, `src/text.rs` | SDF renderer, icon tiles, TrueType text |
+| `crates/core` | shared by both editions: UI, renderer, icons, OS table, config, file system readers (`fs/`), Linux boot discovery (`linux.rs`) |
+| `crates/uefi` | the UEFI app: discovery, chainloading, direct Linux start, boot-order self-heal |
+| `crates/bios` | the BIOS edition: MBR and real-mode stages, VESA graphics, BIOS disks, Linux boot protocol |
+| `crates/biosinstall` | puts the BIOS edition into a disk's MBR (used by both installers) |
 | `install/` | Linux/Windows installer logic, heal service, MOK request |
 | `installer/windows/` | one-click `.exe` launcher (embeds the bundles) |
 | `.github/workflows/ci.yml` | builds everything; real install/heal/uninstall on a Windows runner |
