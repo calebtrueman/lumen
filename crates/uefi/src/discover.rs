@@ -52,9 +52,8 @@ pub struct Entry {
     /// For a Linux card: whether `device_path` is the distro's own loader,
     /// used if starting the kernel directly fails.
     pub has_loader: bool,
-    /// For a distro loader folder on the ESP: the file system its
-    /// `grub.cfg` stub searches for (how GRUB finds /boot).
-    pub grub_root: Option<String>,
+    /// For a GRUB loader on the ESP: where it finds /boot.
+    pub grub_root: Option<GrubRoot>,
 }
 
 /// Where Lumen itself was loaded from, so it doesn't list itself.
@@ -376,7 +375,7 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
                 },
             };
             let mut e = vol.entry(title, file, icon, None, false);
-            e.grub_root = vol.read(&format!("{path}\\grub.cfg"), 64 * 1024).and_then(|t| grub_stub_root(&t));
+            e.grub_root = vol.grub_root(&path, &e.file);
             found.push(e);
         }
 
@@ -420,7 +419,7 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
             let mut e = vol.entry(title, fallback, icon, None, false);
             // Some distros (openSUSE cloud images) install only here, with
             // the same grub.cfg stub a vendor folder would have.
-            e.grub_root = vol.read("\\EFI\\BOOT\\grub.cfg", 64 * 1024).and_then(|t| grub_stub_root(&t));
+            e.grub_root = vol.grub_root("\\EFI\\BOOT", &e.file);
             found.push(e);
         }
 
@@ -641,6 +640,63 @@ fn same_os(loader: &str, install: &str) -> bool {
     a == b || prefix(&a, &b) || prefix(&b, &a)
 }
 
+/// How a GRUB loader on the ESP finds the file system with /boot.
+pub enum GrubRoot {
+    /// From the `grub.cfg` stub next to it (most distros).
+    Uuid(String),
+    /// From the prefix built into GRUB's image, e.g. "(,gpt3)/boot/grub"
+    /// (Arch's `grub-install`): that partition on the loader's own disk.
+    Partition(u32),
+}
+
+impl Volume {
+    fn grub_root(&mut self, dir: &str, loader: &str) -> Option<GrubRoot> {
+        if let Some(u) = self.read(&format!("{dir}\\grub.cfg"), 64 * 1024).and_then(|t| grub_stub_root(&t)) {
+            return Some(GrubRoot::Uuid(u));
+        }
+        self.read(loader, 8 << 20).and_then(|b| grub_embedded_partition(&b)).map(GrubRoot::Partition)
+    }
+}
+
+/// The partition number in a GRUB image's built-in prefix: "(,gpt3)" or
+/// "(hd0,msdos2)" -> 3 / 2.
+fn grub_embedded_partition(image: &[u8]) -> Option<u32> {
+    for tag in [&b",gpt"[..], &b",msdos"[..]] {
+        let mut at = 0;
+        while let Some(i) = image[at..].windows(tag.len()).position(|w| w == tag) {
+            let start = at + i;
+            at = start + tag.len();
+            // "(" directly before, or "(hdN" before.
+            let before = &image[start.saturating_sub(5)..start];
+            let opened = before.last() == Some(&b'(') || before.windows(3).any(|w| w == b"(hd");
+            let digits: Vec<u8> = image[at..].iter().take(4).copied().take_while(u8::is_ascii_digit).collect();
+            if opened && !digits.is_empty() && image.get(at + digits.len()) == Some(&b')') {
+                return core::str::from_utf8(&digits).ok()?.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn partition_number(dp: &DevicePath) -> Option<u32> {
+    dp.node_iter().find_map(|n| match n.as_enum() {
+        Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => Some(hd.partition_number()),
+        _ => None,
+    })
+}
+
+/// Whether two partitions' device paths lead to the same disk (same nodes
+/// up to the partition node).
+fn same_disk(a: &DevicePath, b: &DevicePath) -> bool {
+    let disk = |dp: &DevicePath| -> Vec<u8> {
+        dp.node_iter()
+            .take_while(|n| n.device_type() != DeviceType::MEDIA)
+            .flat_map(|n| n.data().iter().copied().chain([n.full_type().0.0, n.full_type().1.0]))
+            .collect()
+    };
+    disk(a) == disk(b)
+}
+
 /// The UUID a distro's ESP `grub.cfg` stub searches for, e.g.
 /// `search.fs_uuid 0b9f... root` or `search --fs-uuid --set=dev 0b9f...`.
 fn grub_stub_root(text: &[u8]) -> Option<String> {
@@ -707,8 +763,18 @@ fn add_linux(entries: &mut Vec<Entry>) {
                     && !e.file.to_lowercase().starts_with("\\efi\\microsoft")
             })
             .collect();
-        let by_uuid: Vec<usize> =
-            loaders.iter().copied().filter(|&i| entries[i].grub_root.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(&boot_uuid))).collect();
+        let boot_part = partition_number(path);
+        let by_uuid: Vec<usize> = loaders
+            .iter()
+            .copied()
+            .filter(|&i| match &entries[i].grub_root {
+                Some(GrubRoot::Uuid(u)) => u.eq_ignore_ascii_case(&boot_uuid),
+                Some(GrubRoot::Partition(n)) => {
+                    Some(*n) == boot_part && same_disk(&entries[i].device_path, path)
+                }
+                None => false,
+            })
+            .collect();
         let by_name: Vec<usize> = loaders
             .iter()
             .copied()
