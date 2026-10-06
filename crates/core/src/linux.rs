@@ -687,6 +687,13 @@ fn naming(release: Option<&Release>, title: &str) -> (String, Option<&'static Os
             None => r.pretty.clone(),
         };
         let icon = known.or_else(|| r.id_like.split_whitespace().find_map(|l| os::identify(l).filter(|o| o.name != "Linux")));
+        // Flavours share their base's os-release (Kubuntu says "Ubuntu");
+        // the boot entry's title names the flavour.
+        if let (Some(k), Some(t)) = (known, os::identify_text(clean_title(title).as_bytes())) {
+            if t.name != k.name && t.name.to_lowercase().contains(&k.name.to_lowercase()) {
+                return (t.name.to_string(), Some(t));
+            }
+        }
         if !name.is_empty() {
             return (name, known.or(icon));
         }
@@ -906,6 +913,15 @@ menuentry 'openSUSE Tumbleweed'  --class opensuse --class gnu-linux --class gnu 
         assert_eq!(version_from_path("/boot/vmlinuz-6.8.0-31-generic"), "6.8.0-31-generic");
         assert_eq!(version_from_path("/boot/vmlinuz-linux"), "");
         assert_eq!(version_from_path("/vmlinuz-linux-lts"), "");
+    }
+
+    #[test]
+    fn flavours_named_from_the_boot_entry() {
+        let ubuntu = Release { name: "Ubuntu".into(), pretty: "Ubuntu 24.04.1 LTS".into(), id: "ubuntu".into(), id_like: "debian".into() };
+        assert_eq!(naming(Some(&ubuntu), "Kubuntu").0, "Kubuntu");
+        assert_eq!(naming(Some(&ubuntu), "Ubuntu").0, "Ubuntu");
+        let mint = Release { name: "Linux Mint".into(), pretty: "Linux Mint 22".into(), id: "linuxmint".into(), id_like: "ubuntu debian".into() };
+        assert_eq!(naming(Some(&mint), "Ubuntu").0, "Linux Mint", "a different OS's title doesn't win");
     }
 
     #[test]
