@@ -386,7 +386,11 @@ function Invoke-BiosTool([string[]]$arguments) {
     $tool = Join-Path $BiosDir 'lumen-bios-install.exe'
     $disk = Get-BiosDisk
     $all = @($arguments[0], "\\.\PhysicalDrive$($disk.Number)") + @($arguments | Select-Object -Skip 1) + @('--sectors', [string][math]::Floor($disk.Size / 512))
-    $out = & $tool @all 2>&1 | Out-String
+    # Windows PowerShell turns a native tool's stderr into terminating
+    # errors under 'Stop'; read its exit code and message instead.
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & $tool @all 2>&1 | ForEach-Object { "$_" } | Out-String } finally { $ErrorActionPreference = $saved }
     $ok = $LASTEXITCODE -eq 0
     Write-Log "lumen-bios-install $($all -join ' '): $($out.Trim())"
     if (-not $ok) { throw ($out.Trim() -replace '^lumen-bios-install: ', '') }
