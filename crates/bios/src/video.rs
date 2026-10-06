@@ -204,3 +204,10 @@ impl Display {
         bios::call(0x10, R { eax: 0x0003, ..Default::default() });
     }
 }
+
+/// Black screen (before handing the framebuffer to a kernel).
+pub fn clear(m: &Mode) {
+    for y in 0..m.height {
+        unsafe { core::ptr::write_bytes((m.lfb + y * m.pitch) as *mut u8, 0, m.width * (m.bpp as usize).div_ceil(8)) };
+    }
+}

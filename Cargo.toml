@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/core", "crates/uefi", "crates/bios"]
+members = ["crates/core", "crates/uefi", "crates/bios", "crates/biosinstall"]
+# The UEFI app by default; the others build with their own targets
+# (cargo bios) or for the host (the installer helper, tests).
+default-members = ["crates/uefi"]
 exclude = ["tools/gallery", "installer/windows"]
 resolver = "3"
 

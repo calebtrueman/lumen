@@ -1,0 +1,13 @@
+[package]
+name = "lumen-biosinstall"
+description = "Installs Lumen for BIOS PCs into a disk's MBR and the gap before its first partition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumen-bios-install"
+path = "src/main.rs"

@@ -84,6 +84,7 @@ pub fn seg_off(addr: usize) -> (u16, u16) {
 /// Read sectors with INT 13h AH=42h into the bounce buffer
 /// (at most 127 sectors, and they must fit in it).
 pub fn read_sectors(bios_int: extern "C" fn(u32), drive: u8, lba: u64, count: u16) -> bool {
+    debug_assert!(count as usize * 512 <= BOUNCE_SIZE);
     #[repr(C)]
     struct Dap {
         size: u8,

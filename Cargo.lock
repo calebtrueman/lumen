@@ -180,6 +180,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-biosinstall"
+version = "0.4.0"
+
+[[package]]
 name = "lumen-core"
 version = "0.4.0"
 dependencies = [
