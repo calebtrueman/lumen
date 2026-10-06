@@ -581,6 +581,12 @@ fn finish(
     let root = find_root(parts, &cmdline);
     let release = root.and_then(|r| os_release(parts[r].fs.as_mut(), &cmdline));
     let (name, os) = naming(release.as_ref(), &title);
+    // Kernels named without a version (Arch's vmlinuz-linux): the installed
+    // modules say which one it is, when there's just one set.
+    let version = match (version.is_empty(), root) {
+        (true, Some(r)) => modules_version(parts[r].fs.as_mut(), &cmdline).unwrap_or(version),
+        _ => version,
+    };
     // GRUB passes the kernel's own path first; some initramfs scripts
     // and tools read it.
     let cmdline = if cmdline.contains("BOOT_IMAGE=") || source == Source::Bls {
@@ -589,6 +595,20 @@ fn finish(
         format!("BOOT_IMAGE={kernel} {cmdline}").trim_end().to_string()
     };
     Install { name, os, version, boot, kernel, initrds, cmdline, root, source }
+}
+
+fn modules_version(fs: &mut dyn FileSystem, cmdline: &str) -> Option<String> {
+    let top = root_flags_subvol(cmdline);
+    let top = if top.is_empty() { String::from("/") } else { top };
+    for dir in ["usr/lib/modules", "lib/modules"] {
+        let Ok((node, Kind::Dir)) = fs::resolve_at(fs, &top, dir) else { continue };
+        let Ok(list) = fs.list(node) else { continue };
+        let versions: Vec<_> = list.into_iter().filter(|e| e.kind == Kind::Dir && e.name.starts_with(|c: char| c.is_ascii_digit())).collect();
+        if let [one] = versions.as_slice() {
+            return Some(one.name.clone());
+        }
+    }
+    None
 }
 
 fn arg<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {

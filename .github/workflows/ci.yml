@@ -15,8 +15,21 @@ jobs:
         run: |
           rustup toolchain install   # the pinned nightly, targets and rust-src from rust-toolchain.toml
           (cd installer/windows && rustup toolchain install)   # stable, for the Windows launcher
+          rustup +stable target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl   # lumen-bios-install
           sudo apt-get update -qq
-          sudo apt-get install -y -qq osslsigncode mingw-w64 >/dev/null
+          sudo apt-get install -y -qq osslsigncode mingw-w64 qemu-system-x86 >/dev/null
+      - name: Unit tests (installer for BIOS PCs, Linux boot config parsing)
+        run: |
+          cargo test -p lumen-biosinstall --target x86_64-unknown-linux-gnu
+          cargo test -p lumen-core --target x86_64-unknown-linux-gnu --lib
+      - name: File system readers against real ext2/ext4/xfs/btrfs/FAT images
+        run: |
+          tools/test/make-fs-fixtures.sh
+          cargo test -p lumen-core --target x86_64-unknown-linux-gnu --test fs
+      - name: Lumen for BIOS under SeaBIOS
+        env:
+          HOST_TARGET: x86_64-unknown-linux-gnu
+        run: tools/test/bios-smoke.sh
       - name: Build (signed with a throwaway test key, not the release key)
         env:
           LUMEN_TEST_KEY: "1"
@@ -38,6 +51,7 @@ jobs:
             dist/x86_64/mmx64.efi
             dist/x86_64/lumen.cer
             dist/x86_64/lumen.conf
+            dist/x86_64/bios/
 
   windows-install:
     name: Install / heal / uninstall on Windows
@@ -107,3 +121,49 @@ jobs:
           mountvol S: /S
           Check (-not (Test-Path 'S:\EFI\lumen')) 'ESP files removed'
           mountvol S: /D
+
+  windows-bios:
+    name: BIOS install / heal / uninstall on Windows (virtual disk)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-TEST-KEY-do-not-install
+      - name: Install into a VHD's MBR through the real script, then heal and uninstall
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Check($ok, $what) { if ($ok) { "PASS $what" } else { throw "FAIL $what" } }
+          # A 256 MB virtual disk, MBR, NTFS partition at 1 MiB (Windows' layout).
+          $vhd = "$env:RUNNER_TEMP\bios.vhdx"
+          "create vdisk file=$vhd maximum=256 type=expandable`nattach vdisk`nconvert mbr`ncreate partition primary`nformat fs=ntfs quick`nactive" | Set-Content "$env:RUNNER_TEMP\dp.txt"
+          diskpart /s "$env:RUNNER_TEMP\dp.txt" | Out-Null
+          $disk = Get-Disk | Where-Object { $_.Location -eq $vhd }
+          Check ($null -ne $disk) 'virtual disk attached'
+          $env:LUMEN_TEST_BIOS_DISK = $disk.Number
+          $raw = "\\.\PhysicalDrive$($disk.Number)"
+          function Mbr { $f = [IO.File]::Open($raw, 'Open', 'Read', 'ReadWrite'); try { $b = New-Object byte[] 512; [void]$f.Read($b, 0, 512); $b } finally { $f.Close() } }
+          $before = Mbr
+
+          powershell -NoProfile -ExecutionPolicy Bypass -File x86_64\lumen-windows.ps1 -Yes -Bundle x86_64
+          if ($LASTEXITCODE -ne 0) { throw "install failed ($LASTEXITCODE)" }
+          Get-Content "$env:ProgramData\Lumen\install.log" -Tail 20
+          $tool = "$env:ProgramData\Lumen\bios\lumen-bios-install.exe"
+          $sectors = [math]::Floor($disk.Size / 512)
+          Check ((& $tool status $raw --sectors $sectors) -match '^installed') 'Lumen is in the MBR'
+          $after = Mbr
+          Check ([BitConverter]::ToString($after, 440, 72) -eq [BitConverter]::ToString($before, 440, 72)) 'disk signature and partition table untouched'
+          Check ((Get-ScheduledTask -TaskName 'Lumen boot order').State -ne $null) 'heal task registered'
+
+          # Windows' bootsect /nt60 rewrites the MBR code; the heal task puts Lumen back.
+          $f = [IO.File]::Open($raw, 'Open', 'ReadWrite', 'ReadWrite'); $f.Write($before, 0, 512); $f.Close()
+          Check ((& $tool status $raw --sectors $sectors) -match '^displaced') 'MBR rewritten by "Windows"'
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\Lumen\lumen-windows.ps1" -Heal
+          Check ((& $tool status $raw --sectors $sectors) -match '^installed') 'heal put Lumen back'
+
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\Lumen\lumen-windows.ps1" -Uninstall -Yes
+          Start-Sleep 5
+          $final = Mbr
+          Check ([BitConverter]::ToString($final) -eq [BitConverter]::ToString($before)) 'uninstall restored the original MBR'
+          Check (-not (Get-ScheduledTask -TaskName 'Lumen boot order' -ErrorAction SilentlyContinue)) 'heal task removed'

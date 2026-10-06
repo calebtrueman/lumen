@@ -147,7 +147,6 @@ pub struct Partition {
 }
 
 pub struct Table {
-    pub gpt: bool,
     /// The MBR as read (sector 0).
     pub mbr: [u8; 512],
     pub partitions: Vec<Partition>,
@@ -169,12 +168,12 @@ pub fn table(d: &Drive) -> Option<Table> {
     let mut mbr = [0u8; 512];
     mbr.copy_from_slice(&s0[..512]);
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return Some(Table { gpt: false, mbr, partitions: Vec::new() });
+        return Some(Table { mbr, partitions: Vec::new() });
     }
     let protective = (0..4).any(|i| mbr[0x1BE + i * 16 + 4] == 0xEE);
     if protective {
         if let Some(parts) = gpt(d) {
-            return Some(Table { gpt: true, mbr, partitions: parts });
+            return Some(Table { mbr, partitions: parts });
         }
     }
     let sig = le32(&mbr, 0x1B8);
@@ -198,7 +197,7 @@ pub fn table(d: &Drive) -> Option<Table> {
             partuuid: format!("{sig:08x}-{:02x}", i + 1),
         });
     }
-    Some(Table { gpt: false, mbr, partitions: parts })
+    Some(Table { mbr, partitions: parts })
 }
 
 /// Logical partitions: a chain of extended boot records.

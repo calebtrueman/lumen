@@ -64,6 +64,8 @@ if (Test-Path (Join-Path $Bundle $OsArch)) { $Bundle = Join-Path $Bundle $OsArch
 # Legacy BIOS mode? Windows 8+ says so directly; Windows 7 doesn't, so ask
 # which loader started it.
 $Legacy = if ($env:firmware_type) { $env:firmware_type -ne 'UEFI' } else { -not ((bcdedit /enum '{current}' 2>$null | Out-String) -match 'winload\.efi') }
+# Tests only (CI runners boot UEFI): exercise the BIOS path on a virtual disk.
+if ($env:LUMEN_TEST_BIOS_DISK) { $Legacy = $true }
 $BiosDir = @((Join-Path $Bundle 'bios'), (Join-Path $BundleRoot 'bios'), (Join-Path $env:ProgramData 'Lumen\bios')) | Where-Object { Test-Path (Join-Path $_ 'lumen-bios-install.exe') } | Select-Object -First 1
 $IconFile = @((Join-Path $BundleRoot 'lumen.ico'), (Join-Path $Data 'lumen.ico')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
@@ -373,6 +375,7 @@ function New-ApprovalCode {
 
 # The disk the BIOS starts Windows from.
 function Get-BiosDisk {
+    if ($env:LUMEN_TEST_BIOS_DISK) { return Get-Disk -Number ([int]$env:LUMEN_TEST_BIOS_DISK) }
     $d = Get-Disk | Where-Object { $_.IsBoot } | Select-Object -First 1
     if (-not $d) { $d = Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) | Get-Disk }
     if (-not $d) { throw "Couldn't tell which disk this PC starts from." }
