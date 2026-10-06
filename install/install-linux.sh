@@ -194,6 +194,22 @@ put "$HERE/shim$S.efi" "$D/shim$S.efi"
 put "$HERE/mm$S.efi" "$D/mm$S.efi"
 put "$HERE/lumen.cer" "$D/lumen.cer"
 put "$HERE/lumen.efi" "$D/grub$S.efi" # shim starts grub<arch>.efi from its own folder
+# Installs before 0.3 shipped "timeout 5" from the template; Lumen now waits
+# by default, so replace that untouched template line.
+if [ -f "$D/lumen.conf" ] && grep -qx '# Seconds before the highlighted entry starts. 0 = immediately, -1 = wait forever.' "$D/lumen.conf"; then
+    awk '
+        /^# Seconds before the highlighted entry starts\. 0 = immediately, -1 = wait forever\.$/ { held = $0; next }
+        held != "" && /^timeout 5[ \t]*$/ {
+            print "# Lumen waits until you choose. To start the highlighted entry automatically,"
+            print "# use the Auto-start button in Lumen'"'"'s menu (Off, 5, 10 or 30 seconds), or set"
+            print "# a number of seconds here (0 = immediately). The button overrides this line."
+            print "# timeout 10"
+            held = ""; next
+        }
+        held != "" { print held; held = "" }
+        { print }
+    ' "$D/lumen.conf" > "$D/lumen.conf.new" && mv -f "$D/lumen.conf.new" "$D/lumen.conf"
+fi
 if [ ! -f "$D/lumen.conf" ]; then
     cp "$HERE/lumen.conf" "$D/lumen.conf" 2>/dev/null || printf 'default last\n' > "$D/lumen.conf"
     # BitLocker measures the boot chain; hand Windows to its own firmware

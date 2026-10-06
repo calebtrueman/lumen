@@ -49,6 +49,8 @@ case $n in
     [ -n "$(lumen)" ] && [ "$(lumen)" != none ] && say "PASS Lumen boot entry created" || { say "FAIL no Lumen entry"; say "ALL DONE"; poweroff; exit 0; }
     [ "$(efibootmgr | sed -n 's/^BootNext: //p')" = "$(lumen)" ] && say "PASS BootNext points at Lumen" || say "FAIL BootNext"
     [ "$(first)" != "$(lumen)" ] && say "PASS default boot unchanged until Lumen proves itself" || say "FAIL default changed early"
+    # Lumen waits for a choice by default; let it auto-start Debian here.
+    echo "timeout 3" >> /boot/efi/EFI/lumen/lumen.conf
     say "rebooting into Lumen"; sync; reboot ;;
 2)
     [ -e /sys/firmware/efi/efivars/LumenHealthy-4c756d65-6e00-4b6f-9f2a-6c756d656e21 ] && say "PASS Lumen marked itself healthy" || say "FAIL not healthy"

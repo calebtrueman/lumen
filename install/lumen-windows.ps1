@@ -32,7 +32,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.2.1'
+$Version = '0.3.0'
 $Data = Join-Path $env:ProgramData 'Lumen'
 $LogFile = Join-Path $Data 'install.log'
 $TaskName = 'Lumen boot order'
@@ -416,6 +416,17 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
                 Copy-Item $from "$to.new" -Force
                 Move-Item "$to.new" $to -Force
                 if ((Get-FileHash $from).Hash -ne (Get-FileHash $to).Hash) { throw "Couldn't write $to correctly." }
+            }
+            # Installs before 0.3 shipped "timeout 5" from the template; Lumen
+            # now waits by default, so replace that untouched template line.
+            if (Test-Path "$dir\lumen.conf") {
+                $old = Get-Content -Raw "$dir\lumen.conf"
+                $pattern = '(?m)^# Seconds before the highlighted entry starts\. 0 = immediately, -1 = wait forever\.\r?\ntimeout 5[ \t]*\r?$'
+                if ($old -match $pattern) {
+                    $replacement = "# Lumen waits until you choose. To start the highlighted entry automatically,`r`n# use the Auto-start button in Lumen's menu (Off, 5, 10 or 30 seconds), or set`r`n# a number of seconds here (0 = immediately). The button overrides this line.`r`n# timeout 10"
+                    Set-Content -Path "$dir\lumen.conf" -Value ([regex]::Replace($old, $pattern, $replacement)) -Encoding ascii -NoNewline
+                    Write-Log 'Updated lumen.conf: Lumen now waits until you choose (old 5-second default removed).'
+                }
             }
             if (-not (Test-Path "$dir\lumen.conf")) {
                 $conf = if (Test-Path (Join-Path $Bundle 'lumen.conf')) { Get-Content -Raw (Join-Path $Bundle 'lumen.conf') } else { "default last`r`n" }
