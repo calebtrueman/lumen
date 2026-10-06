@@ -72,10 +72,15 @@ configuration, and starts its kernel:
   the initrd is handed over through the standard `LINUX_EFI_INITRD_MEDIA`
   protocol (Linux 5.8 and later).
 - **Under Secure Boot** the kernel must pass shim's own check, exactly as it
-  must when GRUB loads it. Debian kernels (and anything signed with an
-  enrolled MOK) start directly; other distros' kernels are signed with keys
-  only their own shim trusts, so Lumen starts that distro's shim and GRUB
-  instead. Nothing is ever started that shim rejects.
+  must when GRUB loads it. Each distro signs its kernels with its own key,
+  which its own shim carries. The installers read those keys from the
+  distros' shims on the EFI partition (Canonical's for Ubuntu and its
+  flavours, Fedora's, openSUSE's...) and include them in the same one-time
+  approval as Lumen's key, so Lumen can start every installed distro
+  directly. A distro installed later goes through its own GRUB until the
+  installer is run again (it then asks to approve just the new key).
+  Nothing is ever started that shim rejects. To approve only Lumen's own
+  key, use `--no-distro-keys` (Linux) or `-NoDistroKeys` (Windows script).
 - **If anything fails,** Lumen falls back to the distro's own boot loader,
   which is still installed. The distro's loader card is merged into its Linux
   card, so each system appears once.
