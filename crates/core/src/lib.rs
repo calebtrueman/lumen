@@ -8,6 +8,7 @@
 extern crate alloc;
 
 pub mod config;
+pub mod fs;
 pub mod gfx;
 pub mod icons;
 pub mod input;
