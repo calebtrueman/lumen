@@ -5,18 +5,25 @@
 //!   lumen-bios-install uninstall DISK
 //!   lumen-bios-install status    DISK
 //!
-//! DISK is a whole disk (/dev/sda) or a disk image file.
+//! DISK is a whole disk (/dev/sda, \\.\PhysicalDrive0) or a disk image
+//! file. `--sectors N` gives its size where the system can't be asked
+//! (Windows raw disks).
 
 use lumen_biosinstall as bi;
 use std::process::exit;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let mut sectors = None;
+    if let Some(i) = args.iter().position(|a| a == "--sectors") {
+        sectors = args.get(i + 1).and_then(|n| n.parse::<u64>().ok());
+        args.drain(i..(i + 2).min(args.len()));
+    }
     let (Some(cmd), Some(disk)) = (args.get(1), args.get(2)) else {
         eprintln!("usage: lumen-bios-install install|heal|uninstall|status DISK [IMAGE]");
         exit(2);
     };
-    let mut d = match bi::FileDisk::open(disk, block_device_sectors(disk)) {
+    let mut d = match bi::FileDisk::open(disk, sectors.or_else(|| block_device_sectors(disk))) {
         Ok(d) => d,
         Err(e) => fail(&format!("can't open {disk}: {e}")),
     };

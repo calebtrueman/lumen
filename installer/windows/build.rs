@@ -21,6 +21,12 @@ fn main() {
             files.push((format!("{arch}/{n}"), dir.join(&n)));
         }
     }
+    // Lumen for legacy BIOS PCs (x64 only).
+    for n in ["lumen-bios.img", "lumen-bios-install.exe"] {
+        let path = root.join("dist/x86_64/bios").join(n);
+        assert!(path.exists(), "{} missing: run tools/dist.sh x86_64 first", path.display());
+        files.push((format!("x86_64/bios/{n}"), path));
+    }
     let mut src = String::new();
     for (name, path) in &files {
         println!("cargo:rerun-if-changed={}", path.display());

@@ -7,7 +7,10 @@
 # Options used by the one-click installer: --yes (don't ask), --code NNNN
 # (Secure Boot approval code), --result FILE (write key=value results).
 #
-# What it does, and why it can't leave the PC unbootable:
+# On PCs that start in legacy BIOS mode, Lumen's BIOS edition is installed
+# in the boot disk's MBR instead (see "legacy BIOS PCs" below).
+#
+# What it does on UEFI PCs, and why it can't leave the PC unbootable:
 #  * Copies Lumen, Microsoft-signed shim and MokManager to \EFI\lumen\ on the
 #    EFI system partition. Nothing that's already there is modified.
 #  * Adds a firmware boot entry "Lumen" and makes it the *next* boot only.
@@ -53,7 +56,85 @@ die() {
 # ---- preflight -----------------------------------------------------------------
 
 [ "$(id -u)" -eq 0 ] || die "please run as root (sudo)"
-[ -d /sys/firmware/efi ] || die "this PC started Linux in legacy BIOS mode. Lumen needs UEFI mode (switch it in your firmware settings)."
+
+# ---- legacy BIOS PCs ---------------------------------------------------------------
+# Lumen's BIOS edition goes into the boot disk's MBR and the free space
+# before its first partition (lumen-bios-install does the disk work and
+# refuses if that space isn't free). The previous boot code (usually GRUB)
+# stays reachable from Lumen, and holding Shift at power-on skips Lumen.
+if [ ! -d /sys/firmware/efi ]; then
+    LIB=/usr/local/lib/lumen
+    BIOS="$HERE/bios"
+    [ -x "$BIOS/lumen-bios-install" ] || BIOS=$LIB
+    [ -x "$BIOS/lumen-bios-install" ] || die "the installer is incomplete (the BIOS edition of Lumen is missing)"
+    # The disk /boot (or /) lives on, through LVM/LUKS if need be, named
+    # stably (sdX names can change between boots).
+    boot_disk() {
+        src=$(findmnt -n -o SOURCE /boot 2>/dev/null || findmnt -n -o SOURCE /)
+        src=${src%%\[*}
+        name=$(lsblk -nso NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" { gsub(/[^a-zA-Z0-9_-]/, "", $1); print $1; exit }')
+        [ -n "$name" ] || return 1
+        for l in /dev/disk/by-id/wwn-* /dev/disk/by-id/ata-* /dev/disk/by-id/nvme-* /dev/disk/by-id/*; do
+            [ -e "$l" ] && [ "$(basename "$(readlink -f "$l")")" = "$name" ] && case $l in *-part*) ;; *) echo "$l"; return ;; esac
+        done
+        echo "/dev/$name"
+    }
+    if [ "$MODE" = uninstall ]; then
+        if command -v systemctl >/dev/null; then
+            systemctl disable --now lumen-heal.service >/dev/null 2>&1 || true
+            rm -f /etc/systemd/system/lumen-heal.service
+            systemctl daemon-reload || true
+        fi
+        DISK=$(cat "$LIB/disk" 2>/dev/null || boot_disk) || die "couldn't tell which disk this PC starts from"
+        "$BIOS/lumen-bios-install" uninstall "$DISK" || die "couldn't remove Lumen from $DISK"
+        rm -f /usr/local/sbin/lumen-heal
+        rm -rf "$LIB"
+        result "ok=1"
+        say "Lumen has been removed. Your PC will start the way it did before."
+        exit 0
+    fi
+    DISK=$(boot_disk) || die "couldn't tell which disk this PC starts from"
+    UPDATE=0
+    "$BIOS/lumen-bios-install" status "$DISK" | grep -q '^not installed' || UPDATE=1
+    if [ "$YES" -ne 1 ]; then
+        printf 'Install Lumen on %s (BIOS boot sector)? Your current boot loader stays available. [Y/n] ' "$DISK"
+        read -r answer </dev/tty || answer=y
+        case $answer in [nN]*) exit 0 ;; esac
+    fi
+    mkdir -p "$LIB"
+    if [ "$BIOS" != "$LIB" ]; then
+        install -m 0755 "$BIOS/lumen-bios-install" "$LIB/lumen-bios-install"
+        install -m 0644 "$BIOS/lumen-bios.img" "$LIB/lumen-bios.img"
+    fi
+    out=$("$LIB/lumen-bios-install" install "$DISK" "$LIB/lumen-bios.img" 2>&1) || die "${out#lumen-bios-install: }"
+    say "$out"
+    echo "$DISK" > "$LIB/disk"
+    install -m 0755 "$HERE/lumen-heal.sh" /usr/local/sbin/lumen-heal
+    if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
+        cat > /etc/systemd/system/lumen-heal.service <<'UNIT'
+[Unit]
+Description=Keep Lumen as the boot menu
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lumen-heal
+ExecStop=/usr/local/sbin/lumen-heal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload
+        systemctl enable lumen-heal.service >/dev/null 2>&1 || true
+    fi
+    result "ok=1"
+    result "update=$UPDATE"
+    result "bios=1"
+    say "done."
+    [ "$YES" -eq 1 ] || echo "Restart your PC to see Lumen."
+    exit 0
+fi
 case $(uname -m) in
     x86_64) S=x64 ;;
     aarch64) S=aa64 ;;

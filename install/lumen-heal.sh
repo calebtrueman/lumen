@@ -10,6 +10,14 @@
 # (it then sets the LumenHealthy firmware variable), so a Lumen that can't
 # run here never becomes the default.
 set -eu
+# Legacy BIOS PCs: put Lumen back in the MBR if something (grub-install on
+# a GRUB update, say) wrote its own boot code there.
+if [ ! -d /sys/firmware/efi ]; then
+    LIB=/usr/local/lib/lumen
+    [ -x "$LIB/lumen-bios-install" ] && [ -f "$LIB/disk" ] || exit 0
+    "$LIB/lumen-bios-install" heal "$(cat "$LIB/disk")" "$LIB/lumen-bios.img" >/dev/null 2>&1 || true
+    exit 0
+fi
 [ -d /sys/firmware/efi/efivars ] || exit 0
 command -v efibootmgr >/dev/null || exit 0
 

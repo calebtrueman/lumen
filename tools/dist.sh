@@ -70,5 +70,17 @@ osslsigncode sign -h sha256 -certs "$KEYS/lumen.crt" -key "$KEYS/lumen.key" "$@"
     -in "$EFI" -out "$OUT/lumen.efi" >/dev/null
 cp "vendor/shim/$ARCH/shim$S.efi" "vendor/shim/$ARCH/mm$S.efi" "$KEYS/lumen.cer" "$OUT/"
 cp install/install-linux.sh install/lumen-heal.sh install/mok-request.sh install/lumen-windows.ps1 install/lumen.conf "$OUT/"
+if [ "$ARCH" = x86_64 ]; then
+    # Lumen for PCs that start in legacy BIOS mode, and the tool the
+    # installers use to put it in the MBR (static Linux and Windows builds;
+    # stable Rust, like the Windows launcher).
+    tools/bios/build.sh >/dev/null
+    cargo +stable build -q -p lumen-biosinstall --release --target x86_64-pc-windows-gnu
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo +stable build -q -p lumen-biosinstall --release --target x86_64-unknown-linux-musl
+    mkdir -p "$OUT/bios"
+    cp target/bios/lumen-bios.img "$OUT/bios/"
+    cp target/x86_64-pc-windows-gnu/release/lumen-bios-install.exe "$OUT/bios/"
+    cp target/x86_64-unknown-linux-musl/release/lumen-bios-install "$OUT/bios/"
+fi
 echo "Bundle ready in $OUT:"
 ls -1 "$OUT" | sed 's/^/  /'

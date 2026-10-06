@@ -18,6 +18,13 @@
   it back first. Boot entries are edited through the UEFI firmware-variable
   API, not by parsing bcdedit output (which is localised).
 
+  On PCs that start in legacy BIOS mode (no UEFI, or UEFI with CSM),
+  Lumen's BIOS edition goes into the boot disk's MBR and the free space
+  before its first partition instead (bios\lumen-bios-install.exe does the
+  disk work; Windows' own boot code stays reachable from Lumen, and holding
+  Shift at power-on skips Lumen). BitLocker is paused for one restart
+  whenever the MBR changes, so it never asks for the recovery key.
+
   Every install step is undone if a later one fails. A log is written to
   %ProgramData%\Lumen\install.log.
 #>
@@ -32,7 +39,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.3.1'
+$Version = '0.4.0'
 $Data = Join-Path $env:ProgramData 'Lumen'
 $LogFile = Join-Path $Data 'install.log'
 $TaskName = 'Lumen boot order'
@@ -54,6 +61,10 @@ $Loader = "\EFI\lumen\shim$Arch.efi"
 $BundleRoot = $Bundle
 # The one-click installer ships both architectures side by side.
 if (Test-Path (Join-Path $Bundle $OsArch)) { $Bundle = Join-Path $Bundle $OsArch }
+# Legacy BIOS mode? Windows 8+ says so directly; Windows 7 doesn't, so ask
+# which loader started it.
+$Legacy = if ($env:firmware_type) { $env:firmware_type -ne 'UEFI' } else { -not ((bcdedit /enum '{current}' 2>$null | Out-String) -match 'winload\.efi') }
+$BiosDir = @((Join-Path $Bundle 'bios'), (Join-Path $BundleRoot 'bios'), (Join-Path $env:ProgramData 'Lumen\bios')) | Where-Object { Test-Path (Join-Path $_ 'lumen-bios-install.exe') } | Select-Object -First 1
 $IconFile = @((Join-Path $BundleRoot 'lumen.ico'), (Join-Path $Data 'lumen.ico')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 New-Item -ItemType Directory -Force $Data | Out-Null
@@ -146,6 +157,7 @@ public static class LumenFw {
 # can manage boot entries. Detect that and do everything through bcdedit.
 $script:UseBcdedit = $false
 function Initialize-FirmwareAccess {
+    if ($Legacy) { return }
     $priv = [LumenFw]::EnablePrivilege()
     # Probe both the boot order and an actual boot entry: some systems allow
     # one but not the other.
@@ -357,14 +369,101 @@ function New-ApprovalCode {
     '{0:D4}' -f (Get-Random -Minimum 0 -Maximum 10000)
 }
 
+# ---- legacy BIOS PCs -------------------------------------------------------
+
+# The disk the BIOS starts Windows from.
+function Get-BiosDisk {
+    $d = Get-Disk | Where-Object { $_.IsBoot } | Select-Object -First 1
+    if (-not $d) { $d = Get-Partition -DriveLetter $env:SystemDrive.Substring(0, 1) | Get-Disk }
+    if (-not $d) { throw "Couldn't tell which disk this PC starts from." }
+    $d
+}
+
+function Invoke-BiosTool([string[]]$arguments) {
+    $tool = Join-Path $BiosDir 'lumen-bios-install.exe'
+    $disk = Get-BiosDisk
+    $all = @($arguments[0], "\\.\PhysicalDrive$($disk.Number)") + @($arguments | Select-Object -Skip 1) + @('--sectors', [string][math]::Floor($disk.Size / 512))
+    $out = & $tool @all 2>&1 | Out-String
+    $ok = $LASTEXITCODE -eq 0
+    Write-Log "lumen-bios-install $($all -join ' '): $($out.Trim())"
+    if (-not $ok) { throw ($out.Trim() -replace '^lumen-bios-install: ', '') }
+    $out.Trim()
+}
+
+function Get-BiosStatus { Invoke-BiosTool @('status') }
+
+# BitLocker measures the MBR: pause it for the next restart only, so the
+# change doesn't trigger a recovery-key prompt. It resumes by itself.
+function Suspend-BitLockerOnce {
+    try {
+        $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+        if ($v.ProtectionStatus -eq 'On') {
+            Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 1 -ErrorAction Stop | Out-Null
+            Write-Log 'BitLocker paused for one restart (the boot code is changing).'
+        }
+    } catch { Write-Log "BitLocker: $($_.Exception.Message)" }
+}
+
+function Invoke-BiosInstall([scriptblock]$progress) {
+    & $progress 'Copying Lumen…'
+    New-Item -ItemType Directory -Force "$Data\bios" | Out-Null
+    foreach ($f in 'lumen-bios-install.exe', 'lumen-bios.img') {
+        if ((Resolve-Path $BiosDir).Path -ne (Resolve-Path "$Data\bios").Path) { Copy-Item (Join-Path $BiosDir $f) "$Data\bios\$f" -Force }
+    }
+    $script:BiosDir = "$Data\bios"
+    & $progress 'Installing Lumen in the boot sector…'
+    Suspend-BitLockerOnce
+    $out = Invoke-BiosTool @('install', "$Data\bios\lumen-bios.img")
+    Write-Log "BIOS install: $out"
+    if ($PSCommandPath -ne (Join-Path $Data 'lumen-windows.ps1')) { Copy-Item $PSCommandPath (Join-Path $Data 'lumen-windows.ps1') -Force }
+    if ($IconFile -and $IconFile -ne (Join-Path $Data 'lumen.ico')) { Copy-Item $IconFile (Join-Path $Data 'lumen.ico') -Force }
+    Register-HealTask
+    Register-Uninstaller
+    Write-Log "Install of Lumen $Version (BIOS) finished."
+}
+
+# Windows' own repair tools (bootsect, Startup Repair, feature updates) can
+# rewrite the MBR: put Lumen back, keeping the new code as Windows' route.
+function Invoke-BiosHeal {
+    if ((Get-BiosStatus) -notmatch '^displaced') { return }
+    Suspend-BitLockerOnce
+    $out = Invoke-BiosTool @('heal', "$Data\bios\lumen-bios.img")
+    Write-Log "BIOS heal: $out"
+}
+
+function Invoke-BiosUninstall {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ((Get-BiosStatus) -ne 'not installed') {
+        Suspend-BitLockerOnce
+        Invoke-BiosTool @('uninstall') | Out-Null
+    }
+    Remove-Item -Path $UninstallKey -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Log 'Lumen removed (BIOS).'
+    Start-Process -WindowStyle Hidden cmd.exe "/c timeout /t 3 >nul & rmdir /s /q `"$Data`""
+}
+
+function Get-BiosInstallState {
+    $bitlocker = $false
+    try { $bitlocker = (Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop).ProtectionStatus -eq 'On' } catch {}
+    $disk = Get-BiosDisk
+    @{
+        Installed = (Get-BiosStatus) -ne 'not installed'
+        SecureBoot = $false
+        NeedsKey = $false
+        BitLocker = $bitlocker
+        Disk = $disk
+    }
+}
+
 # ---- install / uninstall ---------------------------------------------------
 
 function Test-Preflight {
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'Lumen needs administrator rights to install.'
     }
-    if ($env:firmware_type -ne 'UEFI') {
-        throw "This PC starts Windows in legacy BIOS mode. Lumen needs UEFI mode, which you can switch to with Microsoft's MBR2GPT tool."
+    if ($Legacy) {
+        if (-not $BiosDir) { throw 'The installer is incomplete (the BIOS edition of Lumen is missing). Please download it again.' }
+        return
     }
     if (-not $Uninstall) {
         foreach ($f in 'lumen.efi', "shim$Arch.efi", "mm$Arch.efi", 'lumen.cer') {
@@ -374,6 +473,7 @@ function Test-Preflight {
 }
 
 function Get-InstallState {
+    if ($Legacy) { return Get-BiosInstallState }
     $sb = Test-SecureBoot
     [byte[]]$cert = [IO.File]::ReadAllBytes((Join-Path $Bundle 'lumen.cer'))
     $bitlocker = $false
@@ -396,6 +496,7 @@ function Get-InstallState {
 }
 
 function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
+    if ($Legacy) { return Invoke-BiosInstall $progress }
     $created = @{ Dir = $false; Entry = $null; BcdId = $null; Order = @(if (-not $script:UseBcdedit) { Get-BootOrder }) }
     try {
         & $progress 'Copying Lumen to the EFI system partition…'
@@ -541,6 +642,7 @@ function Register-Uninstaller {
 }
 
 function Invoke-Uninstall {
+    if ($Legacy) { return Invoke-BiosUninstall }
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     if ($script:UseBcdedit) {
         $id = Find-LumenBcdId
@@ -745,7 +847,14 @@ function Start-Gui {
                 $lines += $(if ($state.SecureBoot) { 'Secure Boot stays on. You will approve Lumen once on the next restart.' }
                             else { 'You will approve Lumen once on the next restart, so it keeps working if you turn on Secure Boot later.' })
             }
-            if ($state.BitLocker) { $lines += ''; $lines += 'BitLocker detected: Windows will be started in a way that never asks for your recovery key.' }
+            if ($Legacy) {
+                $lines = @(
+                    'Lumen adds a graphical menu that appears when your PC starts, so you can choose between Windows and your other operating systems.',
+                    '',
+                    "Your current setup is kept: Windows' own boot code stays on the PC, and Lumen can always start it. If Lumen ever has a problem, hold Shift while the PC starts to skip it."
+                )
+                if ($state.BitLocker) { $lines += ''; $lines += 'BitLocker is paused for one restart so the change never asks for your recovery key.' }
+            } elseif ($state.BitLocker) { $lines += ''; $lines += 'BitLocker detected: Windows will be started in a way that never asks for your recovery key.' }
             $verb = if ($state.Installed) { 'Update' } else { 'Install' }
             $choice = Show-Page $w "$verb Lumen" ($lines -join "`n") $verb $(if ($state.Installed) { 'Remove' } else { 'Cancel' })
             if ($choice -eq 'secondary' -and $state.Installed) { $remove = $true }
@@ -813,6 +922,10 @@ if ($Diagnose) {
     return
 }
 if ($Heal) {
+    if ($Legacy) {
+        try { Invoke-BiosHeal } catch { Write-Log "Heal: $($_.Exception.Message)" }
+        return
+    }
     try { [void][LumenFw]::EnablePrivilege(); Invoke-Heal } catch { Write-Log "Heal: $($_.Exception.Message)" }
     return
 }
