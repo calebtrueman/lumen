@@ -66,6 +66,8 @@ def main():
     code = "edk2-x86_64-secure-code.fd" if sb else "edk2-x86_64-code.fd"
     cmd = [
         "qemu-system-x86_64", "-machine", "q35,smm=on" if sb else "q35", "-m", "2048", "-smp", "2",
+        # Modern distros (EL9+) need x86-64-v2; QEMU's default CPU lacks it.
+        "-cpu", "max",
         "-global", "driver=cfi.pflash01,property=secure,value=on",
         "-drive", f"if=pflash,format=raw,readonly=on,file={SHARE}/{code}",
         "-drive", f"if=pflash,format=raw,file={OUT}/vars.fd",
@@ -102,6 +104,9 @@ def main():
                 break
             if started is None:
                 continue
+            if "Kernel panic" in serial:
+                why = "kernel panic: " + serial.split("Kernel panic", 1)[1].splitlines()[0]
+                break
             # Userspace reached: systemd or the login prompt on the console.
             if any(m in serial for m in ("login:", "Reached target", "Welcome to", "systemd[1]")):
                 ok, why = True, "kernel booted to userspace"
