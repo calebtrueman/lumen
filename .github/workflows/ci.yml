@@ -135,9 +135,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           function Check($ok, $what) { if ($ok) { "PASS $what" } else { throw "FAIL $what" } }
+          # A disk whose partition starts at 64 KiB (what diskpart does on small
+          # disks): too little room, so Lumen must refuse and change nothing.
+          $small = "$env:RUNNER_TEMP\small.vhdx"
+          "create vdisk file=$small maximum=256 type=expandable`nattach vdisk`nconvert mbr`ncreate partition primary offset=64`nformat fs=ntfs quick`nactive" | Set-Content "$env:RUNNER_TEMP\dp0.txt"
+          diskpart /s "$env:RUNNER_TEMP\dp0.txt" | Out-Null
+          $sd = Get-Disk | Where-Object { $_.Location -eq $small }
+          $f = [IO.File]::Open("\\.\PhysicalDrive$($sd.Number)", 'Open', 'Read', 'ReadWrite'); $b0 = New-Object byte[] 512; [void]$f.Read($b0, 0, 512); $f.Close()
+          $env:LUMEN_TEST_BIOS_DISK = $sd.Number
+          powershell -NoProfile -ExecutionPolicy Bypass -File x86_64\lumen-windows.ps1 -Yes -Bundle x86_64
+          Check ($LASTEXITCODE -ne 0) 'a disk without room is refused'
+          $f = [IO.File]::Open("\\.\PhysicalDrive$($sd.Number)", 'Open', 'Read', 'ReadWrite'); $b1 = New-Object byte[] 512; [void]$f.Read($b1, 0, 512); $f.Close()
+          Check ([BitConverter]::ToString($b0) -eq [BitConverter]::ToString($b1)) '...and left untouched'
+          Check (-not (Get-ScheduledTask -TaskName 'Lumen boot order' -ErrorAction SilentlyContinue)) '...with nothing registered'
+
           # A 256 MB virtual disk, MBR, NTFS partition at 1 MiB (Windows' layout).
           $vhd = "$env:RUNNER_TEMP\bios.vhdx"
-          "create vdisk file=$vhd maximum=256 type=expandable`nattach vdisk`nconvert mbr`ncreate partition primary`nformat fs=ntfs quick`nactive" | Set-Content "$env:RUNNER_TEMP\dp.txt"
+          "create vdisk file=$vhd maximum=256 type=expandable`nattach vdisk`nconvert mbr`ncreate partition primary offset=1024`nformat fs=ntfs quick`nactive" | Set-Content "$env:RUNNER_TEMP\dp.txt"
           diskpart /s "$env:RUNNER_TEMP\dp.txt" | Out-Null
           $disk = Get-Disk | Where-Object { $_.Location -eq $vhd }
           Check ($null -ne $disk) 'virtual disk attached'
