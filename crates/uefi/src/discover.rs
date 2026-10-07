@@ -353,7 +353,8 @@ pub fn scan(me: &SelfImage, cfg: &Config) -> Vec<Entry> {
         for dir in vol.list("\\EFI", true) {
             let lower = dir.to_lowercase();
             let path = format!("\\EFI\\{dir}");
-            if matches!(lower.as_str(), "boot" | "microsoft" | "linux" | "tools" | "oem" | "dell" | "hp" | "lenovo")
+            // "lumen": Lumen itself, or another copy of it on another disk.
+            if matches!(lower.as_str(), "boot" | "microsoft" | "linux" | "tools" | "oem" | "dell" | "hp" | "lenovo" | "lumen")
                 || (is_self_volume && path.to_lowercase() == own_dir)
             {
                 continue;
@@ -550,7 +551,7 @@ fn merge_firmware_entries(entries: &mut Vec<Entry>, volumes: &mut [Volume], me: 
             .filter(|v| v.part_key.as_deref() == Some(key.as_str()))
             .find_map(|v| v.exists(&file).then_some(&*v));
         let is_self = me.part_key.as_deref() == Some(key.as_str()) && me.file.eq_ignore_ascii_case(&file);
-        if is_self || opt.desc.to_lowercase().contains("lumen") {
+        if is_self || opt.desc.to_lowercase().contains("lumen") || file.to_lowercase().starts_with("\\efi\\lumen\\") {
             continue;
         }
         if vol.is_none() && !present.contains(&key) {

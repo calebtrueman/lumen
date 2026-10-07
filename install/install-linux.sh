@@ -174,7 +174,27 @@ for f in lumen.efi "shim$S.efi" "mm$S.efi" lumen.cer lumen-heal.sh mok-request.s
 done
 
 ESP_MOUNTED_BY_US=""
+# The partition Lumen's existing boot entry points at (installed from Windows,
+# say, on another drive): an update goes there rather than making a copy.
+entry_esp_dev() {
+    line=$(efibootmgr -v 2>/dev/null | grep -E '^Boot[0-9A-Fa-f]{4}\*? Lumen([[:space:]]|$)' | head -n1)
+    [ -n "$line" ] || return 1
+    g=$(echo "$line" | sed -n 's/.*HD([0-9]*,GPT,\([0-9A-Fa-f-]*\),.*/\1/p' | tr 'A-F' 'a-f')
+    if [ -z "$g" ]; then
+        n=$(echo "$line" | sed -n 's/.*HD(\([0-9]*\),MBR,0x\([0-9A-Fa-f]*\),.*/\1/p')
+        sig=$(echo "$line" | sed -n 's/.*HD([0-9]*,MBR,0x\([0-9A-Fa-f]*\),.*/\1/p')
+        [ -n "$n" ] && [ -n "$sig" ] && g=$(printf '%08x-%02x' "0x$sig" "$n")
+    fi
+    [ -n "$g" ] && [ -e "/dev/disk/by-partuuid/$g" ] && readlink -f "/dev/disk/by-partuuid/$g"
+}
+
 find_esp() {
+    if dev=$(entry_esp_dev); then
+        mp=$(findmnt -rno TARGET "$dev" 2>/dev/null | head -n1)
+        if [ -n "$mp" ]; then echo "$mp"; return; fi
+        mkdir -p /run/lumen-esp
+        mount -t vfat "$dev" /run/lumen-esp && echo /run/lumen-esp && return
+    fi
     if command -v bootctl >/dev/null; then
         p=$(bootctl --print-esp-path 2>/dev/null || true)
         if [ -n "$p" ]; then echo "$p"; return; fi
@@ -186,11 +206,12 @@ find_esp() {
     dev=$(lsblk -rno PATH,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
     if [ -n "$dev" ]; then
         mkdir -p /run/lumen-esp
-        mount -t vfat "$dev" /run/lumen-esp && ESP_MOUNTED_BY_US=/run/lumen-esp && echo /run/lumen-esp && return
+        mount -t vfat "$dev" /run/lumen-esp && echo /run/lumen-esp && return
     fi
     return 1
 }
 ESP=$(find_esp) || die "couldn't find the EFI system partition"
+[ "$ESP" = /run/lumen-esp ] && ESP_MOUNTED_BY_US=/run/lumen-esp
 [ -w "$ESP" ] || die "the EFI system partition ($ESP) is read-only"
 D="$ESP/EFI/lumen"
 
@@ -229,13 +250,23 @@ if [ "$MODE" = uninstall ]; then
         systemctl daemon-reload || true
     fi
     rm -f /usr/local/sbin/lumen-heal
-    num=$(lumen_entry)
-    if [ -n "$num" ]; then
+    for num in $(efibootmgr | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Lumen\([[:space:]].*\)\{0,1\}$/\1/p'); do
         if [ "$(efibootmgr | sed -n 's/^BootNext: //p')" = "$num" ]; then efibootmgr --quiet --delete-bootnext || true; fi
         efibootmgr --quiet --delete-bootnum --bootnum "$num" || true
         say "removed firmware boot entry Boot$num"
-    fi
+    done
     rm -rf "$D"
+    # Copies on other drives' EFI partitions (from earlier versions).
+    for dev in $(lsblk -rno PATH,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || $2 == "0xef" { print $1 }'); do
+        mp=$(findmnt -rno TARGET "$dev" 2>/dev/null | head -n1) tmpmp=""
+        if [ -z "$mp" ]; then
+            tmpmp=$(mktemp -d)
+            mount -t vfat "$dev" "$tmpmp" 2>/dev/null || { rmdir "$tmpmp"; continue; }
+            mp=$tmpmp
+        fi
+        [ -f "$mp/EFI/lumen/lumen.cer" ] && rm -rf "$mp/EFI/lumen" && say "removed Lumen from $dev"
+        if [ -n "$tmpmp" ]; then umount "$tmpmp" 2>/dev/null || true; rmdir "$tmpmp" 2>/dev/null || true; fi
+    done
     for v in LumenHealthy LumenLastBoot LumenNote; do
         chattr -i "$EFIVARS/$v-$VENDOR_GUID" 2>/dev/null || true
         rm -f "$EFIVARS/$v-$VENDOR_GUID"
@@ -320,7 +351,14 @@ fi
 sync
 say "copied Lumen to $D"
 
-num=$(lumen_entry)
+# The Lumen entry for this partition (another one may point at an old copy
+# elsewhere, or at a partition that's gone; those are removed below).
+ESP_PARTUUID=$(lsblk -no PARTUUID "$(findmnt -n -o SOURCE "$ESP")" 2>/dev/null | head -n1 | tr 'A-F' 'a-f')
+lumen_entry_here() {
+    efibootmgr -v 2>/dev/null | grep -E '^Boot[0-9A-Fa-f]{4}\*? Lumen([[:space:]]|$)' | tr 'A-F' 'a-f' |
+        grep -F -- "$ESP_PARTUUID" | sed -n 's/^boot\([0-9a-f]\{4\}\).*/\1/p' | head -n1 | tr 'a-f' 'A-F'
+}
+num=$(lumen_entry_here)
 order=$(efibootmgr | sed -n 's/^BootOrder: //p')
 if [ -z "$num" ]; then
     src=$(findmnt -n -o SOURCE "$ESP")
@@ -328,7 +366,8 @@ if [ -z "$num" ]; then
     part=$(cat "/sys/class/block/$(basename "$src")/partition")
     efibootmgr --quiet --create --disk "$disk" --part "$part" --label Lumen --loader "\\EFI\\lumen\\shim$S.efi" ||
         die "the firmware refused to add a boot entry"
-    num=$(lumen_entry)
+    num=$(lumen_entry_here)
+    [ -n "$num" ] || num=$(lumen_entry)
     [ -n "$num" ] || die "the firmware didn't keep the new boot entry"
     CREATED_ENTRY=$num
     say "added firmware boot entry Boot$num"
@@ -413,6 +452,27 @@ else
 fi
 rm -rf "$KEYS"
 sb_on && result "secureboot=1" || result "secureboot=0"
+
+# Earlier versions could leave a second copy of Lumen on another drive's EFI
+# partition (and a second "Lumen" boot entry): keep only this one.
+ESP_DEV=$(findmnt -rno SOURCE "$ESP" 2>/dev/null | head -n1)
+for dev in $(lsblk -rno PATH,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || $2 == "0xef" { print $1 }'); do
+    [ "$(readlink -f "$dev")" = "$(readlink -f "$ESP_DEV")" ] && continue
+    mp=$(findmnt -rno TARGET "$dev" 2>/dev/null | head -n1) tmpmp=""
+    if [ -z "$mp" ]; then
+        tmpmp=$(mktemp -d)
+        mount -t vfat "$dev" "$tmpmp" 2>/dev/null || { rmdir "$tmpmp"; continue; }
+        mp=$tmpmp
+    fi
+    if [ -f "$mp/EFI/lumen/lumen.cer" ]; then
+        rm -rf "$mp/EFI/lumen" && say "removed an extra copy of Lumen from $dev"
+    fi
+    if [ -n "$tmpmp" ]; then umount "$tmpmp" 2>/dev/null || true; rmdir "$tmpmp" 2>/dev/null || true; fi
+done
+for extra in $(efibootmgr | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Lumen\([[:space:]].*\)\{0,1\}$/\1/p'); do
+    [ "$extra" = "$num" ] && continue
+    efibootmgr --quiet --delete-bootnum --bootnum "$extra" && say "removed the extra boot entry Boot$extra"
+done
 
 DONE=1
 result "ok=1"

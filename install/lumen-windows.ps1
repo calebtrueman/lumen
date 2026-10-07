@@ -345,7 +345,84 @@ function Use-Esp([scriptblock]$body) {
     try { & $body "$($letter):" } finally { mountvol "$($letter):" /D | Out-Null }
 }
 
-function Test-LumenFiles { Use-Esp { param($esp) Test-Path "$esp$Loader" } }
+# The partition a boot entry's device path points at (its GPT partition
+# GUID in the hard-drive node), or $null.
+function Get-EntryPartition([uint16]$num) {
+    $d = [LumenFw]::Get(('Boot{0:X4}' -f $num), [LumenFw]::GlobalGuid)
+    if (-not $d -or $d.Length -lt 8) { return $null }
+    $pathLen = [BitConverter]::ToUInt16($d, 4)
+    $at = 6
+    while ($at + 1 -lt $d.Length -and ($d[$at] -ne 0 -or $d[$at + 1] -ne 0)) { $at += 2 }
+    $at += 2
+    $end = [Math]::Min($d.Length, $at + $pathLen)
+    while ($at + 4 -le $end) {
+        $len = [BitConverter]::ToUInt16($d, $at + 2)
+        if ($len -lt 4 -or $d[$at] -eq 0x7F) { break }
+        if ($d[$at] -eq 4 -and $d[$at + 1] -eq 1 -and $len -ge 42 -and $d[$at + 41] -eq 2) {
+            $g = New-Object byte[] 16
+            [Array]::Copy($d, $at + 24, $g, 0, 16)
+            $guid = '{' + (New-Object Guid (,$g)).ToString() + '}'
+            return Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
+        }
+        $at += $len
+    }
+    $null
+}
+
+# Where Lumen lives: the EFI partition its boot entry points at (it may have
+# been installed from Linux, on another drive), else Windows' own.
+function Get-LumenPartition {
+    $num = Find-LumenEntry
+    if ($null -ne $num) {
+        $p = Get-EntryPartition $num
+        if ($p -and $p.GptType -eq $EspType) { return $p }
+    }
+    Get-EspPartition
+}
+
+# Run $body with an EFI partition opened at "X:" (Windows' own through
+# mountvol, any other through a temporary drive letter).
+function Use-Partition($p, [scriptblock]$body) {
+    $system = Get-EspPartition
+    if (-not $p -or ($system -and $p.DiskNumber -eq $system.DiskNumber -and $p.PartitionNumber -eq $system.PartitionNumber)) {
+        return Use-Esp $body
+    }
+    $letter = (70..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1)
+    if (-not $letter) { throw 'No free drive letter to open an EFI system partition.' }
+    Add-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath "$($letter):\" -ErrorAction Stop
+    try { & $body "$($letter):" } finally {
+        Remove-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath "$($letter):\" -ErrorAction SilentlyContinue
+    }
+}
+
+function Use-LumenEsp([scriptblock]$body) { Use-Partition (Get-LumenPartition) $body }
+
+function Test-LumenFiles { Use-LumenEsp { param($esp) Test-Path "$esp$Loader" } }
+
+function Get-AllEsps { @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.GptType -eq $EspType }) }
+
+# Earlier versions could leave a second copy of Lumen on another drive's EFI
+# partition and a second "Lumen" boot entry: keep only ($keep, $keepNum).
+function Remove-OtherLumenCopies($keep, $keepNum) {
+    foreach ($p in Get-AllEsps) {
+        if ($keep -and $p.DiskNumber -eq $keep.DiskNumber -and $p.PartitionNumber -eq $keep.PartitionNumber) { continue }
+        try {
+            Use-Partition $p {
+                param($esp)
+                if (Test-Path "$esp\EFI\lumen\lumen.cer") {
+                    Remove-Item -Recurse -Force "$esp\EFI\lumen"
+                    Write-Log "Removed an extra copy of Lumen (disk $($p.DiskNumber), partition $($p.PartitionNumber))."
+                }
+            }
+        } catch { Write-Log "Couldn't check disk $($p.DiskNumber), partition $($p.PartitionNumber) for an extra copy: $($_.Exception.Message)" }
+    }
+    foreach ($n in (@(Get-BootOrder) + (0..0xFF) | Select-Object -Unique)) {
+        if ($n -ne $keepNum -and (Get-BootDescription $n) -eq $Label) {
+            Remove-LumenEntry ([uint16]$n)
+            Write-Log ('Removed the extra boot entry Boot{0:X4}.' -f $n)
+        }
+    }
+}
 
 # ---- Secure Boot key enrollment --------------------------------------------
 
@@ -644,7 +721,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
     $created = @{ Dir = $false; Entry = $null; BcdId = $null; Order = @(if (-not $script:UseBcdedit) { Get-BootOrder }) }
     try {
         & $progress 'Copying Lumen to the EFI system partition…'
-        Use-Esp {
+        Use-LumenEsp {
             param($esp)
             $dir = "$esp\EFI\lumen"
             $need = 0; Get-ChildItem $Bundle -File | ForEach-Object { $need += $_.Length }
@@ -720,6 +797,8 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
         }
         }
 
+        if (-not $script:UseBcdedit) { Remove-OtherLumenCopies (Get-LumenPartition) $num }
+
         & $progress 'Setting up automatic repair after updates…'
         if ($PSCommandPath -ne (Join-Path $Data 'lumen-windows.ps1')) { Copy-Item $PSCommandPath (Join-Path $Data 'lumen-windows.ps1') -Force }
         if ($IconFile -and $IconFile -ne (Join-Path $Data 'lumen.ico')) { Copy-Item $IconFile (Join-Path $Data 'lumen.ico') -Force }
@@ -741,7 +820,7 @@ function Invoke-Install($state, [string]$code, [scriptblock]$progress) {
             if ($null -ne $created.Entry) { Remove-LumenEntry ([uint16]@($created.Entry)[-1]) }
             if ($created.BcdId) { bcdedit /delete $created.BcdId | Out-Null }
             if ($created.Order.Count -gt 0) { Set-BootOrder $created.Order }
-            if ($created.Dir) { Use-Esp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue } }
+            if ($created.Dir) { Use-LumenEsp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue } }
         } catch { Write-Log "Rollback problem: $($_.Exception.Message)" }
         throw
     }
@@ -797,7 +876,11 @@ function Invoke-Uninstall {
         if ($next -and [BitConverter]::ToUInt16($next, 0) -eq $num) { [LumenFw]::Set('BootNext', [LumenFw]::GlobalGuid, $null, [LumenFw]::NvBsRt) }
         Remove-LumenEntry $num
     }
-    Use-Esp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue }
+    # Every copy, on every drive's EFI partition (earlier versions could make two).
+    foreach ($p in Get-AllEsps) {
+        try { Use-Partition $p { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue } } catch {}
+    }
+    while ($null -ne ($extra = Find-LumenEntry)) { Remove-LumenEntry $extra }
     foreach ($v in 'LumenHealthy', 'LumenLastBoot', 'LumenNote') {
         try { [LumenFw]::Set($v, $LumenGuid, $null, [LumenFw]::NvBsRt) } catch {}
     }
@@ -884,7 +967,7 @@ function Get-DiagnosticReport {
     Add 'bcdedit /enum firmware' { bcdedit /enum firmware 2>&1 }
     Add 'EFI system partition' {
         Get-EspPartition | Select-Object DiskNumber, PartitionNumber, @{n='SizeMB';e={[int]($_.Size / 1MB)}}, Guid | Format-List | Out-String
-        Use-Esp { param($esp)
+        Use-LumenEsp { param($esp)
             "Free: $([int]((Get-PSDrive $esp.Substring(0, 1)).Free / 1KB)) KB"
             Get-ChildItem "$esp\EFI" -Directory | ForEach-Object { "\EFI\$($_.Name)" }
             if (Test-Path "$esp\EFI\lumen\lumen.log") { ''; '-- \EFI\lumen\lumen.log (Lumen''s last start) --'; Get-Content "$esp\EFI\lumen\lumen.log" -Tail 300 }
