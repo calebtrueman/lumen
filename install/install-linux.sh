@@ -201,9 +201,21 @@ healthy() { [ -e "$EFIVARS/LumenHealthy-$VENDOR_GUID" ]; }
 sb_on() { od -An -t u1 "$EFIVARS/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c" 2>/dev/null | awk 'NF { v = $NF } END { exit !(v == 1) }'; }
 hexof() { od -An -tx1 -v "$1" | tr -d ' \n'; }
 key_enrolled() { approved "$HERE/lumen.cer"; }
-approved() { # cert: already in the approved keys (MokListRT)?
-    f="$EFIVARS/MokListRT-$SHIM_GUID"
-    [ -e "$f" ] && hexof "$f" | grep -q "$(hexof "$1")"
+# Is this certificate approved? Lumen records the fingerprints of the keys
+# really approved (LumenApproved): inside an OS started through another
+# distro's shim, MokListRT also shows that distro's built-in key as if it
+# were approved. Without Lumen's record, only Lumen's own key (never built
+# into a shim) can be judged from MokListRT.
+approved() {
+    rec="$EFIVARS/LumenApproved-$VENDOR_GUID"
+    if [ -e "$rec" ]; then
+        h=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)
+        [ -n "$h" ] || h=$(openssl dgst -sha256 -r "$1" | cut -d' ' -f1)
+        hexof "$rec" | cut -c9- | fold -w64 | grep -qx "$h"
+    else
+        f="$EFIVARS/MokListRT-$SHIM_GUID"
+        [ "$1" = "$HERE/lumen.cer" ] && [ -e "$f" ] && hexof "$f" | grep -q "$(hexof "$1")"
+    fi
 }
 
 # ---- uninstall -------------------------------------------------------------------
@@ -364,7 +376,27 @@ approved "$HERE/lumen.cer" || want="$HERE/lumen.cer"
 DISTROS=""
 if [ "$DISTRO_KEYS" -eq 1 ]; then
     . "$HERE/distro-keys.sh"
-    DISTROS=$(distro_keys "$ESP" "$KEYS" 2>/dev/null || true)
+    OWN="$KEYS/own.bin"
+    vendor_cert "$HERE/shim$S.efi" "$OWN" 2>/dev/null || : > "$OWN"
+    # Every EFI partition on every disk: a distro installed on another drive
+    # keeps its shim on that drive's own EFI partition.
+    esps=$(lsblk -rno PATH,PARTTYPE 2>/dev/null | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || $2 == "0xef" { print $1 }')
+    [ -n "$esps" ] || esps=ESP
+    for dev in $esps; do
+        mp="" tmpmp=""
+        if [ "$dev" = ESP ]; then mp=$ESP; else mp=$(findmnt -rno TARGET "$dev" 2>/dev/null | head -n1); fi
+        if [ -z "$mp" ]; then
+            tmpmp=$(mktemp -d)
+            mount -o ro "$dev" "$tmpmp" 2>/dev/null || { rmdir "$tmpmp"; continue; }
+            mp=$tmpmp
+        fi
+        found=$(distro_keys "$mp" "$KEYS" "$OWN" 2>/dev/null || true)
+        say "EFI partition ${dev}: ${found:-no other distro keys}"
+        [ -n "$found" ] && DISTROS="${DISTROS:+$DISTROS, }$found"
+        if [ -n "$tmpmp" ]; then umount "$tmpmp" 2>/dev/null || true; rmdir "$tmpmp" 2>/dev/null || true; fi
+    done
+    rm -f "$OWN"
+    DISTROS=$(echo "$DISTROS" | tr ',' '\n' | sed 's/^ *//' | grep . | sort -u | paste -sd, - | sed 's/,/, /g')
     for k in "$KEYS"/*.der; do
         [ -f "$k" ] && ! approved "$k" && want="$want $k"
     done

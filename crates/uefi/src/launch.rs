@@ -221,3 +221,30 @@ pub fn take_note() -> Option<String> {
     log::info!("note from last start: {text}");
     (!text.is_empty()).then_some(text)
 }
+
+/// Fingerprints (SHA-256) of the Secure Boot keys really approved on this
+/// PC, for the installers. Under Lumen, MokListRT is the one Debian's shim
+/// made: the approved keys plus Debian's own. Inside an OS that was started
+/// through another distro's shim it also lists that distro's built-in key,
+/// so the installers can't tell from there what is approved.
+pub fn record_approved_keys() {
+    const SHIM: VariableVendor = VariableVendor(guid!("605dab50-e046-4300-abb6-3dd810dd8b23"));
+    let Ok((list, _)) = runtime::get_variable_boxed(cstr16!("MokListRT"), &SHIM) else {
+        log::info!("no MokListRT (Lumen wasn't started by shim)");
+        return;
+    };
+    let mut prints = Vec::new();
+    for cert in lumen_core::sha256::x509_in_signature_lists(&list) {
+        prints.extend_from_slice(&lumen_core::sha256::sha256(cert));
+    }
+    log::info!("approved keys (incl. shim's own): {}", prints.len() / 32);
+    let current = runtime::get_variable_boxed(cstr16!("LumenApproved"), &VENDOR).ok();
+    if current.as_ref().map(|(d, _)| &d[..]) != Some(&prints[..]) {
+        let _ = runtime::set_variable(
+            cstr16!("LumenApproved"),
+            &VENDOR,
+            VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
+            &prints,
+        );
+    }
+}

@@ -30,15 +30,24 @@ jobs:
           foreach ($f in $ast.FindAll({ $args[0] -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
               if ($f.Name -in 'Get-VendorCerts', 'Get-DistroKeys', 'Get-MokRequest') { Invoke-Expression $f.Extent.Text }
           }
-          $script:EspDir = "$PWD\esp"
-          function Use-Esp([scriptblock]$body) { & $body $script:EspDir }
-          $Loader = '\EFI\lumen\shimx64.efi'
+          # Two EFI partitions on "different disks", as drive letters: one
+          # with Ubuntu's shim, one empty.
+          New-Item -ItemType Directory -Force "$PWD\esp2\EFI\Microsoft\Boot" | Out-Null
+          subst U: "$PWD\esp"; subst V: "$PWD\esp2"
+          $EspType = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+          function Get-Partition { @([pscustomobject]@{ DiskNumber = 0; PartitionNumber = 1; GptType = $EspType; AccessPaths = @('V:\') },
+                                     [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 1; GptType = $EspType; AccessPaths = @('U:\') }) }
+          function Get-EspPartition { $null }
+          function Write-Log([string]$m) { Write-Host "log: $m" }
+          New-Item -ItemType Directory -Force "$PWD\bundle" | Out-Null
+          [IO.File]::WriteAllBytes("$PWD\bundle\shimx64.efi", [byte[]](1, 2, 3))   # Lumen's shim (no vendor key here)
+          $Bundle = "$PWD\bundle"; $Arch = 'x64'
           $dk = Get-DistroKeys
           "Distros: $($dk.Names -join ', ')   keys: $(@($dk.Certs).Count)"
-          foreach ($c in $dk.Certs) { "  " + (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$c)).Subject }
           if (@($dk.Certs).Count -ne 1 -or $dk.Names -notcontains 'Ubuntu') { throw "FAIL: expected exactly Canonical's key" }
           $subject = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$dk.Certs[0])).Subject
           if ($subject -notmatch 'Canonical Ltd. Master Certificate Authority') { throw "FAIL: got $subject" }
           $req = Get-MokRequest @($dk.Certs) '1234'
           "MokNew $($req.New.Length) bytes"
+          subst U: /D; subst V: /D
           'PASS'

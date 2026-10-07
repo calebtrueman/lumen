@@ -416,11 +416,14 @@ function Get-VendorCerts([byte[]]$d) {
 # the shim Lumen uses). Approved with Lumen's key, they let Lumen start those
 # distros' kernels directly under Secure Boot, verified by shim.
 function Get-DistroKeys {
-    Use-Esp {
-        param($esp)
-        $own = @(if (Test-Path "$esp$Loader") { Get-VendorCerts ([IO.File]::ReadAllBytes("$esp$Loader")) })
-        $seen = @{}; $certs = @(); $names = @()
-        $shims = @(Get-ChildItem "$esp\EFI" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'lumen', 'Microsoft' } |
+    [byte[]]$ownShim = [IO.File]::ReadAllBytes((Join-Path $Bundle "shim$Arch.efi"))
+    $own = @(Get-VendorCerts $ownShim)
+    $state = @{ Seen = @{}; Certs = @(); Names = @() }
+    # Reads the distro shims on one EFI partition (mounted at $root).
+    $scan = {
+        param([string]$root)
+        $found = @()
+        $shims = @(Get-ChildItem (Join-Path $root 'EFI') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'lumen', 'Microsoft' } |
             ForEach-Object { Get-ChildItem $_.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(shim.*|boot(x64|aa64))\.efi$' } })
         foreach ($f in $shims) {
             # @(...): a single certificate must stay one item, not become
@@ -428,23 +431,63 @@ function Get-DistroKeys {
             foreach ($c in @(Get-VendorCerts ([IO.File]::ReadAllBytes($f.FullName)))) {
                 if ($c -isnot [byte[]] -or $c.Length -lt 64) { continue }
                 $k = [Convert]::ToBase64String($c)
-                if ($seen[$k] -or ($own | Where-Object { [Convert]::ToBase64String($_) -eq $k })) { continue }
-                $seen[$k] = $true
-                $certs += ,$c
-                $text = [Text.Encoding]::ASCII.GetString($c)
-                $name = switch -Regex ($text) {
-                    'Canonical' { 'Ubuntu' } 'Fedora' { 'Fedora' } 'openSUSE' { 'openSUSE' } 'SUSE' { 'SUSE' }
-                    'AlmaLinux' { 'AlmaLinux' } 'Rocky' { 'Rocky Linux' } 'CentOS' { 'CentOS' } 'Red Hat' { 'Red Hat' }
-                    'Oracle' { 'Oracle Linux' } default { if ($f.Directory.Name -match '^boot$') { 'Linux' } else { $f.Directory.Name } }
+                if ($state.Seen[$k] -or ($own | Where-Object { [Convert]::ToBase64String($_) -eq $k })) { continue }
+                $state.Seen[$k] = $true
+                $state.Certs += ,$c
+                $name = switch -Regex ([Text.Encoding]::ASCII.GetString($c)) {
+                    'Canonical' { 'Ubuntu'; break } 'Fedora' { 'Fedora'; break } 'openSUSE' { 'openSUSE'; break } 'SUSE' { 'SUSE'; break }
+                    'AlmaLinux' { 'AlmaLinux'; break } 'Rocky' { 'Rocky Linux'; break } 'CentOS' { 'CentOS'; break } 'Red Hat' { 'Red Hat'; break }
+                    'Oracle' { 'Oracle Linux'; break } default { if ($f.Directory.Name -match '^boot$') { 'Linux' } else { $f.Directory.Name } }
                 }
-                if ($name -notin $names) { $names += $name }
+                if ($name -notin $state.Names) { $state.Names += $name }
+                $found += $name
             }
         }
-        @{ Certs = $certs; Names = $names }
+        $found
     }
+    # Every EFI partition on every disk: a distro installed on another
+    # drive keeps its shim on that drive's own EFI partition.
+    $system = Get-EspPartition
+    $esps = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.GptType -eq $EspType -or $_.MbrType -eq 0xEF })
+    foreach ($p in $esps) {
+        $where = "disk $($p.DiskNumber), partition $($p.PartitionNumber)"
+        $added = $null
+        try {
+            $root = @($p.AccessPaths | Where-Object { $_ -match '^[A-Z]:\\$' }) | Select-Object -First 1
+            if ($root) {
+                $found = & $scan $root
+            } elseif ($system -and $p.DiskNumber -eq $system.DiskNumber -and $p.PartitionNumber -eq $system.PartitionNumber) {
+                $found = Use-Esp { param($esp) & $scan "$esp\" }
+            } else {
+                $letter = (70..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1)
+                if (-not $letter) { throw 'no free drive letter' }
+                Add-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath "$($letter):\" -ErrorAction Stop
+                $added = "$($letter):\"
+                $found = & $scan $added
+            }
+            Write-Log "EFI partition ($where): $(if ($found) { @($found) -join ', ' } else { 'no other distro keys' })"
+        } catch {
+            Write-Log "EFI partition ($where): couldn't read it: $($_.Exception.Message)"
+        } finally {
+            if ($added) { Remove-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath $added -ErrorAction SilentlyContinue }
+        }
+    }
+    @{ Certs = $state.Certs; Names = $state.Names }
 }
 
 function Test-KeyEnrolled([byte[]]$cert) {
+    # Lumen records the fingerprints of the keys really approved
+    # (LumenApproved). MokListRT inside an OS started through another
+    # distro's shim also shows that distro's built-in key as approved, so
+    # without Lumen's record it's only trusted for Lumen's own key.
+    $record = [LumenFw]::Get('LumenApproved', $LumenGuid)
+    if ($record) {
+        $h = [Security.Cryptography.SHA256]::Create().ComputeHash($cert)
+        for ($i = 0; $i + 32 -le $record.Length; $i += 32) {
+            if ([Convert]::ToBase64String($record, $i, 32) -eq [Convert]::ToBase64String($h)) { return $true }
+        }
+        return $false
+    }
     [LumenFw]::IndexOf([LumenFw]::Get('MokListRT', [LumenFw]::ShimGuid), $cert) -ge 0
 }
 

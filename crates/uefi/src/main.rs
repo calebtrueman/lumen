@@ -387,6 +387,7 @@ fn main() -> Status {
         log::info!("clock: {}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute);
     }
     let note = launch::take_note();
+    launch::record_approved_keys();
     // Firmware arms a 5-minute watchdog before running boot options.
     let _ = boot::set_watchdog_timer(0, 0x10000, None);
     clock::init();

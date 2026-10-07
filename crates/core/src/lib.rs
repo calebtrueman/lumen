@@ -14,5 +14,6 @@ pub mod icons;
 pub mod input;
 pub mod linux;
 pub mod os;
+pub mod sha256;
 pub mod text;
 pub mod ui;

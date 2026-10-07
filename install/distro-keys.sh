@@ -62,10 +62,11 @@ key_name() {
     case $2 in BOOT|boot) echo Linux ;; *) echo "$2" ;; esac
 }
 
-# distro_keys ESP OUTDIR: one .der per distro CA not built into Lumen's own
-# shim (Debian's). Prints the distros they belong to ("Ubuntu, Fedora").
+# distro_keys ESP OUTDIR OWNBLOB: one .der per distro CA on that EFI
+# partition, except OWNBLOB (the key built into Lumen's shim, Debian's).
+# Prints the distros they belong to ("Ubuntu, Fedora").
 distro_keys() {
-    own_blob="$2/own.bin"; vendor_cert "$1/EFI/lumen/shim$S.efi" "$own_blob" 2>/dev/null || : > "$own_blob"
+    own_blob=$3
     seen=""
     for shim in "$1"/EFI/*/shim*.efi "$1"/EFI/*/SHIM*.EFI "$1"/EFI/BOOT/BOOT*.EFI "$1"/EFI/boot/boot*.efi; do
         [ -f "$shim" ] || continue
@@ -77,7 +78,7 @@ distro_keys() {
         name=$(key_name "$2/blob" "$dir")
         case " $seen " in *" $name "*) ;; *) seen="${seen:+$seen, }$name" ;; esac
     done
-    rm -f "$2/blob" "$own_blob"
+    rm -f "$2/blob"
     # Drop duplicates (the same distro's shim in two folders).
     for a in "$2"/*.der; do
         [ -f "$a" ] || continue
