@@ -423,7 +423,10 @@ function Get-DistroKeys {
         $shims = @(Get-ChildItem "$esp\EFI" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'lumen', 'Microsoft' } |
             ForEach-Object { Get-ChildItem $_.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(shim.*|boot(x64|aa64))\.efi$' } })
         foreach ($f in $shims) {
-            foreach ($c in (Get-VendorCerts ([IO.File]::ReadAllBytes($f.FullName)))) {
+            # @(...): a single certificate must stay one item, not become
+            # its bytes (Windows PowerShell unrolls a lone byte array).
+            foreach ($c in @(Get-VendorCerts ([IO.File]::ReadAllBytes($f.FullName)))) {
+                if ($c -isnot [byte[]] -or $c.Length -lt 64) { continue }
                 $k = [Convert]::ToBase64String($c)
                 if ($seen[$k] -or ($own | Where-Object { [Convert]::ToBase64String($_) -eq $k })) { continue }
                 $seen[$k] = $true

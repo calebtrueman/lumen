@@ -36,7 +36,9 @@ jobs:
           $dk = Get-DistroKeys
           "Distros: $($dk.Names -join ', ')   keys: $(@($dk.Certs).Count)"
           foreach ($c in $dk.Certs) { "  " + (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$c)).Subject }
-          if (@($dk.Certs).Count -lt 1 -or $dk.Names -notcontains 'Ubuntu') { throw 'FAIL: Canonical key not found' }
+          if (@($dk.Certs).Count -ne 1 -or $dk.Names -notcontains 'Ubuntu') { throw "FAIL: expected exactly Canonical's key" }
+          $subject = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$dk.Certs[0])).Subject
+          if ($subject -notmatch 'Canonical Ltd. Master Certificate Authority') { throw "FAIL: got $subject" }
           $req = Get-MokRequest @($dk.Certs) '1234'
           "MokNew $($req.New.Length) bytes"
           'PASS'
