@@ -26,7 +26,21 @@ for CER in "$@"; do
     printf '\120\253\135\140\106\340\000\103\253\266\075\330\020\335\213\043'   # shim GUID (owner)
     cat "$CER"
 done > "$T/new"
-{ cat "$T/new"; printf '%s' "$pw" | iconv -f UTF-8 -t UTF-16LE; } | openssl dgst -sha256 -binary > "$T/auth"
+# Password as UTF-16LE: each ASCII character followed by a zero byte (the
+# installers' codes are digits; iconv only for anything else). Only
+# coreutils' sha256sum is needed: openssl isn't on every desktop install.
+utf16le() {
+    case $1 in
+        *[!\ -~]*) printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE || { echo "can't encode the password (iconv missing)" >&2; exit 1; } ;;
+        *) printf '%s' "$1" | od -An -v -tu1 | tr -s ' ' '\n' | grep . | while read -r c; do printf "\\$(printf %03o "$c")\\000"; done ;;
+    esac
+}
+hex2bin() {
+    printf "$(awk 'BEGIN { h = "0123456789abcdef" } { for (i = 1; i < length($0); i += 2) printf "\\%03o", (index(h, substr($0, i, 1)) - 1) * 16 + index(h, substr($0, i + 1, 1)) - 1 }')"
+}
+{ cat "$T/new"; utf16le "$pw"; } > "$T/hashed"
+sha256sum "$T/hashed" | cut -c1-64 | hex2bin > "$T/auth"
+[ "$(wc -c < "$T/auth")" -eq 32 ] || { echo "couldn't compute the request's hash" >&2; exit 1; }
 
 # efivarfs needs each variable written in a single write() of
 # attributes + data, so assemble it first and copy it in one go.

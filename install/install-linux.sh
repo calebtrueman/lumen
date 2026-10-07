@@ -445,7 +445,7 @@ if [ -z "$want" ]; then
 else
     if [ -z "$CODE" ]; then CODE=$(od -An -N2 -tu2 /dev/urandom | awk '{ printf "%04d", $1 % 10000 }'); fi
     # shellcheck disable=SC2086
-    LUMEN_MOK_PASSWORD=$CODE "$HERE/mok-request.sh" $want >/dev/null || die "couldn't queue the Secure Boot key"
+    err=$(LUMEN_MOK_PASSWORD=$CODE sh "$HERE/mok-request.sh" $want 2>&1 >/dev/null) || die "couldn't queue the Secure Boot key${err:+: $err}"
     result "mok=queued"
     result "code=$CODE"
     [ -n "$DISTROS" ] && [ "$want" != "$HERE/lumen.cer" ] && result "distros=$DISTROS"
