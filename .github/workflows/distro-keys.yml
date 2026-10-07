@@ -1,0 +1,42 @@
+name: Distro keys (Windows PowerShell 5.1)
+
+# The Windows installer's reading of distro signing keys from their shims,
+# run in Windows PowerShell 5.1 (what installs use) on a real Ubuntu shim.
+on:
+  push:
+    paths: [install/lumen-windows.ps1, .github/workflows/distro-keys.yml]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Ubuntu's signed shim
+        shell: bash
+        run: |
+          curl -fsSLO http://archive.ubuntu.com/ubuntu/pool/main/s/shim-signed/shim-signed_1.59+15.8-0ubuntu2_amd64.deb
+          mkdir deb && cd deb && 7z x -y ../shim-signed_*.deb >/dev/null && 7z x -y data.tar* >/dev/null && 7z x -y data.tar >/dev/null 2>&1 || true
+          find . -name 'shimx64.efi*' | head
+          mkdir -p ../esp/EFI/ubuntu ../esp/EFI/Microsoft/Boot
+          cp "$(find . -name 'shimx64.efi.signed*' | head -1)" ../esp/EFI/ubuntu/shimx64.efi
+          ls -la ../esp/EFI/ubuntu
+      - name: Read the keys as the installer does
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "PowerShell $($PSVersionTable.PSVersion)"
+          $ast = [Management.Automation.Language.Parser]::ParseFile("$PWD\install\lumen-windows.ps1", [ref]$null, [ref]$null)
+          foreach ($f in $ast.FindAll({ $args[0] -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+              if ($f.Name -in 'Get-VendorCerts', 'Get-DistroKeys', 'Get-MokRequest') { Invoke-Expression $f.Extent.Text }
+          }
+          $script:EspDir = "$PWD\esp"
+          function Use-Esp([scriptblock]$body) { & $body $script:EspDir }
+          $Loader = '\EFI\lumen\shimx64.efi'
+          $dk = Get-DistroKeys
+          "Distros: $($dk.Names -join ', ')   keys: $(@($dk.Certs).Count)"
+          foreach ($c in $dk.Certs) { "  " + (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$c)).Subject }
+          if (@($dk.Certs).Count -lt 1 -or $dk.Names -notcontains 'Ubuntu') { throw 'FAIL: Canonical key not found' }
+          $req = Get-MokRequest @($dk.Certs) '1234'
+          "MokNew $($req.New.Length) bytes"
+          'PASS'
