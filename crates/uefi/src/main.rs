@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod clock;
 mod discover;
+mod journal;
 mod launch;
 mod linux_boot;
 mod mouse;
@@ -320,7 +321,7 @@ fn wall_clock() -> Option<ui::WallTime> {
     Some(ui::WallTime { year: t.year(), month: t.month(), day: t.day(), hour: t.hour(), minute: t.minute() })
 }
 
-fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
+fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config, me: &SelfImage) -> String {
     log::info!("starting {:?} ({})", entry.title, entry.file);
     launch::remember(entry);
     display.fade_out();
@@ -338,13 +339,23 @@ fn boot_entry(display: &mut Display, entry: &Entry, cfg: &Config) -> String {
     let _ = system::with_stdout(|o| o.clear());
     if let Some(target) = &entry.linux {
         log::info!("starting kernel {} directly", target.kernel);
+        journal::save(me.device, &me.dir());
         let why = linux_boot::boot(target);
-        log::info!("direct start of {:?} failed: {why}", entry.title);
+        log::warn!("direct start of {:?} failed: {why}", entry.title);
         if !entry.has_loader {
+            journal::save(me.device, &me.dir());
             return format!("Couldn't start {} — {why}", entry.title);
         }
-        // Fall back to the distro's own boot loader.
+        // Fall back to the distro's own boot loader, and say why next time.
+        let advice = if why.contains("isn't signed by a key") {
+            String::from("its signing key isn't approved on this PC yet. Run Lumen's installer again to approve it")
+        } else {
+            why.clone()
+        };
+        launch::set_note(&format!("Last time {} started through its own boot loader: {advice}.", entry.title));
+        log::info!("falling back to {}", entry.file);
     }
+    journal::save(me.device, &me.dir());
     match launch::start(entry) {
         // The loader ran and came back (e.g. the user left the UEFI shell).
         launch::Outcome::Exited => String::new(),
@@ -364,11 +375,18 @@ fn main() -> Status {
     if uefi::helpers::init().is_err() {
         return Status::ABORTED;
     }
-    // The logger writes to the text console, which would draw over the UI;
-    // diagnostics are only wanted in debug-console test builds.
-    if !cfg!(feature = "debugcon") {
-        log::set_max_level(log::LevelFilter::Off);
+    journal::init();
+    log::info!("Lumen {} ({})", env!("CARGO_PKG_VERSION"), if cfg!(target_arch = "x86_64") { "x64" } else { "aa64" });
+    log::info!(
+        "firmware: {} rev {:#x}; Secure Boot {}",
+        system::firmware_vendor(),
+        system::firmware_revision(),
+        if linux_boot::secure_boot_enabled() { "on" } else { "off" }
+    );
+    if let Some(t) = wall_clock() {
+        log::info!("clock: {}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute);
     }
+    let note = launch::take_note();
     // Firmware arms a 5-minute watchdog before running boot options.
     let _ = boot::set_watchdog_timer(0, 0x10000, None);
     clock::init();
@@ -394,6 +412,7 @@ fn main() -> Status {
 
     discover::connect_all();
     let entries = discover::scan(&me, &cfg);
+    journal::save(me.device, &me.dir());
     let sel = default_index(&entries, &cfg);
 
     // Timeout 0: boot straight away, unless a key is already being held.
@@ -401,7 +420,7 @@ fn main() -> Status {
     // The delay chosen with Lumen's Auto-start button wins over lumen.conf.
     let timeout = launch::saved_auto_start().unwrap_or(cfg.timeout);
     if timeout == 0 && !key_held && !entries.is_empty() {
-        boot_entry(&mut display, &entries[sel], &cfg);
+        boot_entry(&mut display, &entries[sel], &cfg, &me);
         display.sync_mode();
     }
 
@@ -409,6 +428,10 @@ fn main() -> Status {
     let mut ui = ui::Ui::new(cards(&entries), sel, launch::firmware_setup_supported(), clock::now());
     let mut entries = entries;
     ui.wall_clock = wall_clock;
+    // Why the last start had to take a detour (e.g. Linux through GRUB).
+    if let Some(note) = note {
+        ui.notify_for(note, clock::now() + 0.8, 15.0);
+    }
     ui.show_clock = cfg.clock;
     ui.set_auto_start(if timeout > 0 { timeout } else { -1 });
     if timeout > 0 && !key_held {
@@ -467,7 +490,7 @@ fn main() -> Status {
         match command {
             ui::Command::None => {}
             ui::Command::Boot(i) => {
-                let err = boot_entry(&mut display, &entries[i], &cfg);
+                let err = boot_entry(&mut display, &entries[i], &cfg, &me);
                 display.sync_mode();
                 let _ = system::with_stdout(|o| o.enable_cursor(false));
                 if !err.is_empty() {

@@ -224,7 +224,7 @@ if [ "$MODE" = uninstall ]; then
         say "removed firmware boot entry Boot$num"
     fi
     rm -rf "$D"
-    for v in LumenHealthy LumenLastBoot; do
+    for v in LumenHealthy LumenLastBoot LumenNote; do
         chattr -i "$EFIVARS/$v-$VENDOR_GUID" 2>/dev/null || true
         rm -f "$EFIVARS/$v-$VENDOR_GUID"
     done

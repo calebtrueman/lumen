@@ -748,7 +748,11 @@ fn add_linux(entries: &mut Vec<Entry>) {
         if path.node_iter().any(|n| matches!(n.as_enum(), Ok(DevicePathNodeEnum::MessagingUsb(_) | DevicePathNodeEnum::MessagingUsbClass(_)))) {
             continue;
         }
-        let Some(fs) = linux_boot::open_fs(h) else { continue };
+        let Some(fs) = linux_boot::open_fs(h) else {
+            log::info!("partition {}: no readable Linux file system", linux_partuuid(&path));
+            continue;
+        };
+        log::info!("partition {}: {:?} {:?} {}", linux_partuuid(&path), fs.fs_type(), fs.label(), fs.uuid());
         parts.push(linux::Part { fs, partuuid: linux_partuuid(&path) });
         where_.push((h, path));
     }

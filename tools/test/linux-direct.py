@@ -50,11 +50,17 @@ def main():
     expect = args[args.index("--expect") + 1] if "--expect" in args else None
     shot = args[args.index("--shot") + 1] if "--shot" in args else None
     refusal = "--expect-refusal" in args
+    # --esp-image=IMG: a real FAT image as the ESP (QEMU's virtual FAT folder
+    # mangles files the guest writes); --keep-vars: firmware variables from
+    # the previous run (to see what Lumen remembered).
+    esp_image = next((a.split("=", 1)[1] for a in args if a.startswith("--esp-image=")), None)
+    keep_vars = "--keep-vars" in args
     # --approve=DIR: nothing enrolled yet; DIR holds MokNew/MokAuth as the
     # installers write them (password 1234), approved on shim's blue screen.
     request = next((a.split("=", 1)[1] for a in args if a.startswith("--approve=")), None)
     fallback = "--expect-fallback" in args
 
+    saved_vars = open(f"{OUT}/vars.fd", "rb").read() if keep_vars else None
     shutil.rmtree(OUT, ignore_errors=True)
     esp = os.path.join(OUT, "esp", "EFI", "BOOT")
     os.makedirs(esp)
@@ -79,6 +85,8 @@ def main():
     with open(f"{esp}/lumen.conf", "w") as f:
         f.write("timeout 0\nstay-default off\n")
 
+    if saved_vars:
+        open(f"{OUT}/vars.fd", "wb").write(saved_vars)
     code = "edk2-x86_64-secure-code.fd" if sb else "edk2-x86_64-code.fd"
     cmd = [
         "qemu-system-x86_64", "-machine", "q35,smm=on" if sb else "q35", "-m", "2048", "-smp", "2",
@@ -87,7 +95,8 @@ def main():
         "-global", "driver=cfi.pflash01,property=secure,value=on",
         "-drive", f"if=pflash,format=raw,readonly=on,file={SHARE}/{code}",
         "-drive", f"if=pflash,format=raw,file={OUT}/vars.fd",
-        "-drive", f"file=fat:rw:{OUT}/esp,format=raw,if=none,id=d0", "-device", "ide-hd,drive=d0,bootindex=0",
+        "-drive", (f"file={esp_image},format=raw,if=none,id=d0" if esp_image else f"file=fat:rw:{OUT}/esp,format=raw,if=none,id=d0"),
+        "-device", "ide-hd,drive=d0,bootindex=0",
         "-drive", f"file={disk},if=none,id=d1,snapshot=on,format={'qcow2' if disk.endswith('.qcow2') else 'raw'}",
         "-device", "virtio-blk-pci,drive=d1",
         "-net", "none", "-vga", "std", "-display", "none",

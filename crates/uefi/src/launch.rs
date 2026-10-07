@@ -200,3 +200,24 @@ pub fn save_auto_start(secs: i32) {
         &secs.to_le_bytes(),
     );
 }
+
+/// A one-time message for the next start (why the last start took a detour).
+pub fn set_note(text: &str) {
+    let current = runtime::get_variable_boxed(cstr16!("LumenNote"), &VENDOR).ok();
+    if current.as_ref().map(|(d, _)| &d[..]) != Some(text.as_bytes()) {
+        let _ = runtime::set_variable(
+            cstr16!("LumenNote"),
+            &VENDOR,
+            VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS,
+            text.as_bytes(),
+        );
+    }
+}
+
+pub fn take_note() -> Option<String> {
+    let (data, _) = runtime::get_variable_boxed(cstr16!("LumenNote"), &VENDOR).ok()?;
+    let _ = runtime::delete_variable(cstr16!("LumenNote"), &VENDOR);
+    let text = String::from_utf8_lossy(&data).into_owned();
+    log::info!("note from last start: {text}");
+    (!text.is_empty()).then_some(text)
+}

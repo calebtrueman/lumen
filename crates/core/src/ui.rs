@@ -82,7 +82,7 @@ pub struct Ui {
     act_focus: Vec<f32>,
     cam: f32,
     countdown: Option<(f64, f64)>, // (start, length)
-    toast: Option<(String, f64, bool)>, // (message, shown at, is error)
+    toast: Option<(String, f64, bool, f64)>, // (message, shown at, is error, seconds)
     /// When each card started its entrance animation.
     appear: Vec<f64>,
     pub show_clock: bool,
@@ -177,12 +177,17 @@ impl Ui {
     }
 
     pub fn toast(&mut self, msg: String, now: f64) {
-        self.toast = Some((msg, now, true));
+        self.toast = Some((msg, now, true, 4.5));
         self.redraw = true;
     }
 
     pub fn notify(&mut self, msg: String, now: f64) {
-        self.toast = Some((msg, now, false));
+        self.notify_for(msg, now, 4.5);
+    }
+
+    /// A notice that needs reading (and maybe acting on): shown longer.
+    pub fn notify_for(&mut self, msg: String, now: f64, secs: f64) {
+        self.toast = Some((msg, now, false, secs));
         self.redraw = true;
     }
 
@@ -299,8 +304,8 @@ impl Ui {
         }
         moving |= self.appear.iter().any(|&t| now - t < 0.7);
         moving |= self.countdown.is_some();
-        if let Some((_, t, _)) = self.toast {
-            if now - t > 4.5 {
+        if let Some((_, t, _, secs)) = self.toast {
+            if now - t > secs {
                 self.toast = None;
             }
             moving = true;
@@ -409,12 +414,27 @@ impl Ui {
         }
 
         // ---- toast ----------------------------------------------------
-        if let Some((msg, t, error)) = &self.toast {
+        if let Some((msg, t, error, secs)) = &self.toast {
             let age = (now - t) as f32;
-            let a = clamp01(age / 0.2) * clamp01((4.5 - age) / 0.4);
+            let a = clamp01(age / 0.2) * clamp01((*secs as f32 - age) / 0.4);
             let size = 15.0 * s;
-            let tw = text.width(Face::Body, size, msg) + 44.0 * s;
-            let th = 44.0 * s;
+            // Long messages wrap onto two lines, split at the space nearest
+            // the middle.
+            let max = w * 0.52 - 44.0 * s; // clear of the clock and key hints
+            let lines: Vec<&str> = if text.width(Face::Body, size, msg) > max {
+                let mid = msg.len() / 2;
+                let split = msg.char_indices().filter(|(_, c)| *c == ' ').map(|(i, _)| i).min_by_key(|i| i.abs_diff(mid));
+                match split {
+                    Some(i) => alloc::vec![&msg[..i], &msg[i + 1..]],
+                    None => alloc::vec![msg.as_str()],
+                }
+            } else {
+                alloc::vec![msg.as_str()]
+            };
+            let widest = lines.iter().map(|l| text.width(Face::Body, size, l)).fold(0.0f32, f32::max);
+            let tw = widest.min(max) + 44.0 * s;
+            let line_h = size * 1.45;
+            let th = 44.0 * s + (lines.len() as f32 - 1.0) * line_h;
             let (tx, ty) = (w / 2.0 - tw / 2.0, 36.0 * s + (1.0 - ease_out(clamp01(age / 0.3))) * -20.0 * s);
             cv.shadow(tx, ty + 6.0 * s, tw, th, th / 2.0, 24.0 * s, rgb(0, 0, 0), 0.4 * a);
             if *error {
@@ -423,7 +443,11 @@ impl Ui {
                 cv.rrect(tx, ty, tw, th, th / 2.0, rgb(40, 44, 60), 0.92 * a);
                 cv.rrect_stroke(tx, ty, tw, th, th / 2.0, 1.0, white, 0.18 * a);
             }
-            text.draw_centered(cv, Face::Body, size, msg, w / 2.0, ty + th / 2.0 + size * 0.36, white, a);
+            let first = ty + th / 2.0 - (lines.len() as f32 - 1.0) * line_h / 2.0;
+            for (k, line) in lines.iter().enumerate() {
+                let line = text.fit(Face::Body, size, line, max);
+                text.draw_centered(cv, Face::Body, size, &line, w / 2.0, first + k as f32 * line_h + size * 0.36, white, a);
+            }
         }
     }
 

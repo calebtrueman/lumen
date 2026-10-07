@@ -129,6 +129,7 @@ fn bls_entries(parts: &mut [Part], i: usize, top: &str, out: &mut Vec<Install>) 
         let base = join(top, base);
         let dir = join(&base, "loader/entries");
         let Ok(list) = fs::list_dir(parts[i].fs.as_mut(), &dir) else { continue };
+        log::info!("  BLS entries in {dir}: {}", list.len());
         let grubenv = read_grubenv(parts[i].fs.as_mut(), &base);
         let mut entries: Vec<Bls> = list
             .iter()
@@ -152,9 +153,15 @@ fn bls_entries(parts: &mut [Part], i: usize, top: &str, out: &mut Vec<Install>) 
             let fsys = parts[i].fs.as_mut();
             // Paths are relative to the partition the entries are on; when
             // that's the root file system, /boot is often spelled out.
-            let Some(kernel) = locate(fsys, &[&base, top, "/"], &e.linux) else { continue };
+            let Some(kernel) = locate(fsys, &[&base, top, "/"], &e.linux) else {
+                log::info!("  {}: kernel {} not found", e.file, e.linux);
+                continue;
+            };
             let initrds: Option<Vec<String>> = e.initrds.iter().map(|p| locate(fsys, &[&base, top, "/"], p)).collect();
-            let Some(initrds) = initrds else { continue };
+            let Some(initrds) = initrds else {
+                log::info!("  {}: an initrd of {:?} not found", e.file, e.initrds);
+                continue;
+            };
             let version = if e.version.is_empty() { version_from_path(&e.linux) } else { e.version.clone() };
             out.push(finish(parts, i, e.title, version, kernel, initrds, e.options, Source::Bls));
             break; // the default entry is enough
@@ -227,7 +234,11 @@ fn grub_entries(parts: &mut [Part], i: usize, top: &str, out: &mut Vec<Install>)
         let path = join(top, p);
         let Some(text) = fs::read_text(parts[i].fs.as_mut(), &path) else { continue };
         let grubenv = read_grubenv(parts[i].fs.as_mut(), fs::path::parent(fs::path::parent(&path)));
-        let Some(entry) = parse_grub(&text, &grubenv) else { continue };
+        let Some(entry) = parse_grub(&text, &grubenv) else {
+            log::info!("  {path}: no Linux menu entry");
+            continue;
+        };
+        log::info!("  {path}: first entry {:?}: linux {} initrd {:?}", entry.title, entry.linux, entry.initrds);
         // Which file system the paths are on: the one `search` picked, or
         // else the one grub.cfg itself is on.
         let target = match &entry.search {
@@ -236,11 +247,20 @@ fn grub_entries(parts: &mut [Part], i: usize, top: &str, out: &mut Vec<Install>)
             Some(Search::File(f)) => (0..parts.len()).find(|&j| fs::exists(parts[j].fs.as_mut(), f)),
             None => Some(i),
         };
-        let Some(t) = target else { continue };
+        let Some(t) = target else {
+            log::info!("  {path}: the file system GRUB searches for isn't readable here");
+            continue;
+        };
         let fsys = parts[t].fs.as_mut();
-        let Some(kernel) = locate(fsys, &["/", top], &entry.linux) else { continue };
+        let Some(kernel) = locate(fsys, &["/", top], &entry.linux) else {
+            log::info!("  {path}: kernel {} not found", entry.linux);
+            continue;
+        };
         let initrds: Option<Vec<String>> = entry.initrds.iter().map(|p| locate(fsys, &["/", top], p)).collect();
-        let Some(initrds) = initrds else { continue };
+        let Some(initrds) = initrds else {
+            log::info!("  {path}: an initrd of {:?} not found", entry.initrds);
+            continue;
+        };
         let version = version_from_path(&entry.linux);
         out.push(finish(parts, t, entry.title, version, kernel, initrds, entry.args, Source::Grub));
         return;

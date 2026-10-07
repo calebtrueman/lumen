@@ -339,6 +339,17 @@ key; never install those on a real PC.
 > signing certificate, Windows shows *"Windows protected your PC"*. Click
 > *More info → Run anyway*.
 
+## When something goes wrong
+
+- **Lumen says so.** If an OS had to be started a different way than usual
+  (for example Linux through its own GRUB because Secure Boot refused the
+  kernel), Lumen shows why the next time it starts, with what to do.
+- **`\EFI\lumen\lumen.log`** on the EFI system partition records what
+  Lumen found at its last start (each partition, each boot configuration it
+  read) and how starting each system went. It's plain text: on Linux it's
+  usually `/boot/efi/EFI/lumen/lumen.log`; on Windows the Windows
+  installer's diagnostics report includes it.
+
 ## Configuration
 
 `\EFI\lumen\lumen.conf`:

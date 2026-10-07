@@ -9,12 +9,12 @@ license.workspace = true
 lumen-core = { path = "../core" }
 libm = "0.2.16"
 log = "0.4.34"
-uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "logger"] }
+uefi = { version = "0.41.0", features = ["alloc", "global_allocator"] }
 uefi-raw = "0.17"
 
 [features]
-# Send log output to the QEMU debug console (I/O port 0xE9). Testing only.
-debugcon = ["uefi/log-debugcon"]
+# Also send the log to the QEMU debug console (I/O port 0xE9). Testing only.
+debugcon = []
 
 [dev-dependencies]
 log = "0.4.34"

@@ -40,7 +40,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.4.1'
+$Version = '0.4.2'
 $Data = Join-Path $env:ProgramData 'Lumen'
 $LogFile = Join-Path $Data 'install.log'
 $TaskName = 'Lumen boot order'
@@ -755,7 +755,7 @@ function Invoke-Uninstall {
         Remove-LumenEntry $num
     }
     Use-Esp { param($esp) Remove-Item -Recurse -Force "$esp\EFI\lumen" -ErrorAction SilentlyContinue }
-    foreach ($v in 'LumenHealthy', 'LumenLastBoot') {
+    foreach ($v in 'LumenHealthy', 'LumenLastBoot', 'LumenNote') {
         try { [LumenFw]::Set($v, $LumenGuid, $null, [LumenFw]::NvBsRt) } catch {}
     }
     # Withdraw a Secure Boot approval request that was never confirmed.
@@ -844,6 +844,7 @@ function Get-DiagnosticReport {
         Use-Esp { param($esp)
             "Free: $([int]((Get-PSDrive $esp.Substring(0, 1)).Free / 1KB)) KB"
             Get-ChildItem "$esp\EFI" -Directory | ForEach-Object { "\EFI\$($_.Name)" }
+            if (Test-Path "$esp\EFI\lumen\lumen.log") { ''; '-- \EFI\lumen\lumen.log (Lumen''s last start) --'; Get-Content "$esp\EFI\lumen\lumen.log" -Tail 300 }
         }
     }
     Add 'Scheduled task' { (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Select-Object TaskName, State | Out-String) + "(none means not installed)" }

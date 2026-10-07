@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
 libm = "0.2.16"
+log = "0.4.34"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 ruzstd = { version = "0.8", default-features = false }
 
