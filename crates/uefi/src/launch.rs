@@ -48,6 +48,10 @@ pub fn start(entry: &Entry) -> Outcome {
 }
 
 pub fn remember(entry: &Entry) {
+    // Only when it changed: firmware variable storage is small and wears.
+    if last_choice().as_deref() == Some(entry.id.as_str()) {
+        return;
+    }
     let _ = runtime::set_variable(
         cstr16!("LumenLastBoot"),
         &VENDOR,
@@ -240,11 +244,29 @@ pub fn record_approved_keys() {
     log::info!("approved keys (incl. shim's own): {}", prints.len() / 32);
     let current = runtime::get_variable_boxed(cstr16!("LumenApproved"), &VENDOR).ok();
     if current.as_ref().map(|(d, _)| &d[..]) != Some(&prints[..]) {
-        let _ = runtime::set_variable(
+        if let Err(e) = runtime::set_variable(
             cstr16!("LumenApproved"),
             &VENDOR,
             VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
             &prints,
-        );
+        ) {
+            log::warn!("couldn't save LumenApproved: {:?} (firmware variable storage full?)", e.status());
+        }
+    }
+    log_variable_space();
+}
+
+/// How full the firmware's variable storage is (QueryVariableInfo), for
+/// the log: a full store makes every later setting change fail.
+fn log_variable_space() {
+    let attrs = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS;
+    match runtime::query_variable_info(attrs) {
+        Ok(i) => log::info!(
+            "firmware variable storage: {} KiB free of {} KiB (largest variable {} KiB)",
+            i.remaining_variable_storage_size / 1024,
+            i.maximum_variable_storage_size / 1024,
+            i.maximum_variable_size / 1024
+        ),
+        Err(e) => log::info!("firmware variable storage: unknown ({:?})", e.status()),
     }
 }

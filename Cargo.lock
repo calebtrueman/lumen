@@ -160,7 +160,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lumen"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "libm",
  "log",
@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-bios"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "libm",
  "linked_list_allocator",
@@ -181,11 +181,11 @@ dependencies = [
 
 [[package]]
 name = "lumen-biosinstall"
-version = "0.4.4"
+version = "0.4.5"
 
 [[package]]
 name = "lumen-core"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "fontdue",
  "libm",

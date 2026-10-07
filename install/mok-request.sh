@@ -42,13 +42,19 @@ hex2bin() {
 sha256sum "$T/hashed" | cut -c1-64 | hex2bin > "$T/auth"
 [ "$(wc -c < "$T/auth")" -eq 32 ] || { echo "couldn't compute the request's hash" >&2; exit 1; }
 
-# efivarfs needs each variable written in a single write() of
-# attributes + data, so assemble it first and copy it in one go.
+# efivarfs needs each variable written in a single write() of attributes +
+# data, so assemble it first and copy it in one go. An existing request is
+# deleted first: efivarfs can't truncate a variable, so rewriting one in
+# place fails (e.g. one queued earlier by the Windows installer).
 put_var() { # name datafile
+    f="$V/$1-$G"
     { printf '\007\000\000\000'; cat "$2"; } > "$T/$1.var"
-    chattr -i "$V/$1-$G" 2>/dev/null || true
-    dd if="$T/$1.var" of="$V/$1-$G" bs="$(wc -c < "$T/$1.var")" count=1 2>/dev/null ||
-        { echo "couldn't write $1" >&2; exit 1; }
+    if [ -e "$f" ]; then
+        chattr -i "$f" 2>/dev/null || true
+        rm -f "$f" 2>/dev/null || true
+    fi
+    err=$(dd if="$T/$1.var" of="$f" bs="$(wc -c < "$T/$1.var")" count=1 conv=notrunc 2>&1) ||
+        { echo "couldn't write $1 ($(echo "$err" | grep -v records | head -n1))" >&2; exit 1; }
 }
 put_var MokNew "$T/new"
 put_var MokAuth "$T/auth"
